@@ -1,4 +1,5 @@
 // Copyright 2019 Lukas Malkmus
+// Copyright 2026 David Collom
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,7 +16,8 @@ package collector
 
 import (
 	"bytes"
-	"io/ioutil"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -24,16 +26,22 @@ import (
 
 const cpuSubsystem = "cpu"
 
+func trimNewline(b []byte) []byte {
+	return bytes.TrimRight(b, "\r\n")
+}
+
 type cpuCollector struct {
 	cpuTempCelsius *prometheus.Desc
 	cpuFreqHertz   *prometheus.Desc
+	cpuFreqMin     *prometheus.Desc
+	cpuFreqMax     *prometheus.Desc
 }
 
 func init() {
 	registerCollector("cpu", defaultEnabled, NewCPUCollector)
 }
 
-// NewCPUCollector returns a new Collector exposing CPU temperature metrics.
+// NewCPUCollector returns a new Collector exposing CPU temperature and frequency metrics.
 func NewCPUCollector() (Collector, error) {
 	cc := &cpuCollector{
 		cpuTempCelsius: prometheus.NewDesc(
@@ -43,7 +51,17 @@ func NewCPUCollector() (Collector, error) {
 		),
 		cpuFreqHertz: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, cpuSubsystem, "frequency_hertz"),
-			"CPU Frequency in hertz (Hz).",
+			"CPU frequency in hertz (Hz) (current).",
+			[]string{"cpu"}, nil,
+		),
+		cpuFreqMin: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, cpuSubsystem, "frequency_min_hertz"),
+			"CPU minimum frequency in hertz (Hz).",
+			[]string{"cpu"}, nil,
+		),
+		cpuFreqMax: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, cpuSubsystem, "frequency_max_hertz"),
+			"CPU maximum frequency in hertz (Hz).",
 			[]string{"cpu"}, nil,
 		),
 	}
@@ -52,52 +70,75 @@ func NewCPUCollector() (Collector, error) {
 
 // Update implements the Collector interface.
 func (c *cpuCollector) Update(ch chan<- prometheus.Metric) error {
-	// Get temperature string from /sys/class/thermal/thermal_zone0/temp and
-	// convert it to float64 value.
-	b, err := ioutil.ReadFile("/sys/class/thermal/thermal_zone0/temp")
-	if err != nil {
-		return err
+	// Temperature from the SoC thermal zone.
+	temp, err := readThermalZoneTemp("/sys/class/thermal/thermal_zone0/temp")
+	if err == nil {
+		ch <- prometheus.MustNewConstMetric(
+			c.cpuTempCelsius,
+			prometheus.GaugeValue, temp,
+		)
+	} else {
+		return fmt.Errorf("reading thermal_zone0 temp: %w", err)
 	}
-	temp, err := strconv.ParseFloat(string(bytes.TrimSpace(b)), 64)
-	if err != nil {
-		return err
-	}
-	temp = temp / 1000
 
-	// Export the metric.
-	ch <- prometheus.MustNewConstMetric(
-		c.cpuTempCelsius,
-		prometheus.GaugeValue, temp,
-	)
-
-	// Get all the cpus from /sys/devices/system/cpu/cpu*.
+	// Frequencies per logical CPU.
 	cpus, err := filepath.Glob("/sys/devices/system/cpu/cpu[0-9]*")
 	if err != nil {
-		return err
+		return fmt.Errorf("globbing /sys/devices/system/cpu: %w", err)
 	}
 
 	for i, cpu := range cpus {
-		// Get the frequency string from /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq
-		// and convert it to a float64 value.
-		// Use scaling_cur_freq rather than cpuinfo_cur_freq because that seems to be
-		// more accurate, according to the internet.
-		b, err = ioutil.ReadFile(cpu + "/cpufreq/scaling_cur_freq")
-		if err != nil {
-			return err
-		}
-		freq, err := strconv.ParseFloat(string(bytes.TrimSpace(b)), 64)
-		if err != nil {
-			return err
-		}
+		label := strconv.Itoa(i)
 
-		// Export the metric.
-		ch <- prometheus.MustNewConstMetric(
-			c.cpuFreqHertz,
-			prometheus.GaugeValue,
-			freq,
-			strconv.Itoa(i),
-		)
+		if cur, err := readMHz(cpu + "/cpufreq/scaling_cur_freq"); err == nil {
+			ch <- prometheus.MustNewConstMetric(
+				c.cpuFreqHertz,
+				prometheus.GaugeValue, cur, label,
+			)
+		}
+		if mn, err := readMHz(cpu + "/cpufreq/scaling_min_freq"); err == nil {
+			ch <- prometheus.MustNewConstMetric(
+				c.cpuFreqMin,
+				prometheus.GaugeValue, mn, label,
+			)
+		}
+		if mx, err := readMHz(cpu + "/cpufreq/scaling_max_freq"); err == nil {
+			ch <- prometheus.MustNewConstMetric(
+				c.cpuFreqMax,
+				prometheus.GaugeValue, mx, label,
+			)
+		}
+		_ = cpu
 	}
 
 	return nil
+}
+
+// readMHz reads a /sys/devices/system/cpu/cpuN/cpufreq/scaling_*_freq
+// file whose contents are kHz and returns Hz. Errors are returned to
+// the caller.
+func readMHz(path string) (float64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.ParseFloat(string(trimNewline(b)), 64)
+	if err != nil {
+		return 0, err
+	}
+	return v * 1000, nil
+}
+
+// readThermalZoneTemp reads /sys/class/thermal/thermal_zone*/temp which
+// is milli-degrees celsius and returns degrees celsius.
+func readThermalZoneTemp(path string) (float64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.ParseFloat(string(trimNewline(b)), 64)
+	if err != nil {
+		return 0, err
+	}
+	return v / 1000, nil
 }

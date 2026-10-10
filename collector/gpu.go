@@ -1,4 +1,5 @@
 // Copyright 2019 Lukas Malkmus
+// Copyright 2026 David Collom
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,42 +15,39 @@
 package collector
 
 import (
+	"bytes"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
 const gpuSubsystem = "gpu"
 
-// The vcgencmd components to be considered part of the gpu.
-// The clock frequency of these will be exported.
+// getGpuComponents returns the vcgencmd clock components that are
+// considered part of the GPU for frequency metrics.
 func getGpuComponents() []string {
-	return []string{"core", "h264", "v3d"}
+	return []string{"core", "h264", "v3d", "isp", "h264-qp", "hevc", "hevc-qp"}
 }
-
-var (
-	// /opt/vc/bin/vcgencmd for RaspiOS 32bit
-	// /usr/bin/vcgencmd for RaspiOS 64bit
-	vcgencmd = kingpin.Flag("vcgencmd", "vcgencmd including path.").Default("/opt/vc/bin/vcgencmd").String()
-)
 
 type gpuCollector struct {
 	vcgencmd       string
 	gpuTempCelsius *prometheus.Desc
 	gpuFreqHertz   *prometheus.Desc
+	gpuVoltage     *prometheus.Desc
 }
 
 func init() {
 	registerCollector("gpu", defaultEnabled, NewGPUCollector)
 }
 
-// NewGPUCollector returns a new Collector exposing GPU temperature metrics.
+// NewGPUCollector returns a new Collector exposing GPU temperature, frequency and
+// voltage metrics sourced from vcgencmd.
 func NewGPUCollector() (Collector, error) {
 	gc := &gpuCollector{
-		vcgencmd: *vcgencmd,
+		vcgencmd: *vcgencmdPath,
 		gpuTempCelsius: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, gpuSubsystem, "temperature_celsius"),
 			"GPU temperature in degrees celsius (°C).",
@@ -57,8 +55,13 @@ func NewGPUCollector() (Collector, error) {
 		),
 		gpuFreqHertz: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, gpuSubsystem, "frequency_hertz"),
-			"GPU frequency in hertz (Hz).",
+			"GPU clock frequency in hertz (Hz).",
 			[]string{"component"}, nil,
+		),
+		gpuVoltage: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, gpuSubsystem, "voltage_volts"),
+			"GPU core voltage in volts.",
+			nil, nil,
 		),
 	}
 	return gc, nil
@@ -66,61 +69,95 @@ func NewGPUCollector() (Collector, error) {
 
 // Update implements the Collector interface.
 func (c *gpuCollector) Update(ch chan<- prometheus.Metric) error {
-	// Get temperature string by executing /opt/vc/bin/vcgencmd measure_temp
-	// and convert it to float64 value.
-	cmd := exec.Command(c.vcgencmd, "measure_temp")
-	stdout, err := cmd.Output()
+	// GPU temperature. Same thermal sensor as cpuTemp on Pi but the
+	// firmware presents it via vcgencmd measure_temp. Useful when the
+	// /sys/class/thermal device isn't readable.
+	temp, err := c.measureTemp()
 	if err != nil {
 		return err
 	}
-
-	// temp=55.3'C => 55.3
-	tempStr := string(stdout)
-	idx := strings.IndexByte(tempStr, '=')
-	if idx != -1 {
-		tempStr = tempStr[idx+1:]
-	}
-	tempStr = strings.TrimSuffix(tempStr, "'C\n")
-	temp, err := strconv.ParseFloat(tempStr, 64)
-	if err != nil {
-		return err
-	}
-
-	// Export the metric.
 	ch <- prometheus.MustNewConstMetric(
 		c.gpuTempCelsius,
 		prometheus.GaugeValue, temp,
 	)
 
+	// Per-component clock frequencies.
 	for _, component := range getGpuComponents() {
-		// Get frequency string by executing vcgencmd and
-		// convert it to float64 value.
-		cmd = exec.Command(c.vcgencmd, "measure_clock", component)
-		stdout, err := cmd.Output()
+		freq, err := c.measureClock(component)
 		if err != nil {
-			return err
+			// Component clocks are not present on every Pi. Log and continue.
+			slog.Debug("skipping gpu component", "component", component, "err", err)
+			continue
 		}
-
-		// frequency(1)=400000000 => 400000000
-		freqStr := string(stdout)
-		idx = strings.IndexByte(freqStr, '=')
-		if idx != -1 {
-			freqStr = freqStr[idx+1:]
-		}
-		freqStr = strings.TrimSuffix(freqStr, "\n")
-		freq, err := strconv.ParseFloat(freqStr, 64)
-		if err != nil {
-			return err
-		}
-
-		// Export the metric.
 		ch <- prometheus.MustNewConstMetric(
 			c.gpuFreqHertz,
-			prometheus.GaugeValue,
-			freq,
-			component,
+			prometheus.GaugeValue, freq, component,
+		)
+	}
+
+	// GPU core voltage. Reported by vcgencmd measure_volts.
+	volts, err := c.measureVolts()
+	if err != nil {
+		slog.Debug("measure_volts failed", "err", err)
+	} else {
+		ch <- prometheus.MustNewConstMetric(
+			c.gpuVoltage,
+			prometheus.GaugeValue, volts,
 		)
 	}
 
 	return nil
 }
+
+// measureTemp runs `vcgencmd measure_temp` and returns the temperature
+// in degrees celsius.
+func (c *gpuCollector) measureTemp() (float64, error) {
+	out, err := exec.Command(c.vcgencmd, "measure_temp").Output()
+	if err != nil {
+		return 0, err
+	}
+	return parseValue(string(out), "temp=", "'C")
+}
+
+// measureVolts runs `vcgencmd measure_volts` and returns the voltage
+// in volts.
+func (c *gpuCollector) measureVolts() (float64, error) {
+	out, err := exec.Command(c.vcgencmd, "measure_volts").Output()
+	if err != nil {
+		return 0, err
+	}
+	return parseValue(string(out), "volt=", "V")
+}
+
+// measureClock runs `vcgencmd measure_clock <component>` and returns
+// the clock frequency in hertz.
+func (c *gpuCollector) measureClock(component string) (float64, error) {
+	out, err := exec.Command(c.vcgencmd, "measure_clock", component).Output()
+	if err != nil {
+		return 0, err
+	}
+	// Example output: "frequency(0)=400000000"
+	return parseValue(string(out), "=", "")
+}
+
+// parseValue expects input of the form `<prefix><value><suffix>` and
+// parses the float between them.
+func parseValue(input, prefix, suffix string) (float64, error) {
+	s := input
+	if prefix != "" {
+		idx := strings.Index(s, prefix)
+		if idx < 0 {
+			return 0, &parseError{input: input}
+		}
+		s = s[idx+len(prefix):]
+	}
+	if suffix != "" {
+		s = strings.TrimSuffix(s, suffix)
+	}
+	s = string(bytes.TrimSpace([]byte(s)))
+	return strconv.ParseFloat(s, 64)
+}
+
+type parseError struct{ input string }
+
+func (e *parseError) Error() string { return "unexpected vcgencmd output: " + e.input }

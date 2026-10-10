@@ -1,4 +1,6 @@
 // Copyright 2015 The Prometheus Authors
+// Copyright 2019 Lukas Malkmus
+// Copyright 2026 David Collom
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,12 +17,12 @@ package collector
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
 // Namespace defines the common namespace to be used by all metrics.
@@ -43,14 +45,24 @@ var (
 	)
 )
 
+// vcgencmdPath is the path to vcgencmd used by collectors that need
+// Raspberry Pi firmware data. It is a single flag shared across collectors
+// so it can be overridden once.
+var vcgencmdPath = kingpin.Flag(
+	"vcgencmd",
+	"Path to the vcgencmd binary used by the gpu and vcgencmd collectors. "+
+		"Common values: /opt/vc/bin/vcgencmd (32-bit RaspiOS), "+
+		"/usr/bin/vcgencmd (64-bit RaspiOS).",
+).Default("/usr/bin/vcgencmd").String()
+
 var (
 	factories      = make(map[string]func() (Collector, error))
 	collectorState = make(map[string]*bool)
 )
 
-// registerCollector registers a givec RPiCollector on the
-func registerCollector(collector string, isDefaultEnabled bool, factory func() (Collector, error)) {
-	// Get the default state as a string for the help flag.
+// registerCollector registers a given Collector on the package-level
+// factory map and registers a flag to enable/disable it.
+func registerCollector(name string, isDefaultEnabled bool, factory func() (Collector, error)) {
 	var helpDefaultState string
 	if isDefaultEnabled {
 		helpDefaultState = "enabled"
@@ -58,15 +70,14 @@ func registerCollector(collector string, isDefaultEnabled bool, factory func() (
 		helpDefaultState = "disabled"
 	}
 
-	// Create the flags for the givec RPiCollector.
-	flagName := fmt.Sprintf("collector.%s", collector)
-	flagHelp := fmt.Sprintf("Enable the %s collector (default: %s).", collector, helpDefaultState)
+	flagName := fmt.Sprintf("collector.%s", name)
+	flagHelp := fmt.Sprintf("Enable the %s collector (default: %s).", name, helpDefaultState)
 	defaultValue := fmt.Sprintf("%v", isDefaultEnabled)
 
 	flag := kingpin.Flag(flagName, flagHelp).Default(defaultValue).Bool()
-	collectorState[collector] = flag
+	collectorState[name] = flag
 
-	factories[collector] = factory
+	factories[name] = factory
 }
 
 // Collector is the interface a collector has to implement.
@@ -82,7 +93,6 @@ type RPiCollector struct {
 
 // New creates a new Raspberry Pi collector.
 func New(filters ...string) (*RPiCollector, error) {
-	// Build the map of requested/filtered collectors.
 	f := make(map[string]bool)
 	for _, filter := range filters {
 		enabled, exist := collectorState[filter]
@@ -95,7 +105,6 @@ func New(filters ...string) (*RPiCollector, error) {
 		f[filter] = true
 	}
 
-	// Get the requested collectors.
 	collectors := make(map[string]Collector)
 	for key, enabled := range collectorState {
 		if *enabled {
@@ -131,22 +140,24 @@ func (c RPiCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func execute(name string, c Collector, ch chan<- prometheus.Metric) {
-	// Update the collector and meassure its execution time.
 	begin := time.Now()
 	err := c.Update(ch)
 	duration := time.Since(begin)
 	var success float64
 
-	// Log the execution status and set the appropriate success value.
 	if err != nil {
-		log.Errorf("%s collector failed after %fs: %s", name, duration.Seconds(), err)
+		slog.Error("collector failed",
+			"collector", name,
+			"duration_seconds", duration.Seconds(),
+			"err", err)
 		success = 0
 	} else {
-		log.Debugf("%s collector succeeded after %fs", name, duration.Seconds())
+		slog.Debug("collector succeeded",
+			"collector", name,
+			"duration_seconds", duration.Seconds())
 		success = 1
 	}
 
-	// Record execution time and success value.
 	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, duration.Seconds(), name)
 	ch <- prometheus.MustNewConstMetric(scrapeSuccessDesc, prometheus.GaugeValue, success, name)
 }

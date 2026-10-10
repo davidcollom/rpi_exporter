@@ -1,2 +1,17 @@
-**
-!rpi_exporter
+# Files & directories ignored by git for the rpi_exporter repository.
+
+# Standard Go build/import artefacts.
+rpi_exporter
+rpi_exporter-*
+
+# Test binary & Go workspace files.
+*.test
+*.out
+
+# Editor / IDE caches.
+.idea/
+.vscode/
+*.swp
+
+# Buildkit / docker buildx cache mounts that may leak into the tree.
+.cache/

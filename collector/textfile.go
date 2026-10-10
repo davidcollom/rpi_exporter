@@ -1,4 +1,5 @@
 // Copyright 2015 The Prometheus Authors
+// Copyright 2026 David Collom
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,18 +16,17 @@ package collector
 
 import (
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/log"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	"github.com/alecthomas/kingpin/v2"
 )
 
 var (
@@ -50,8 +50,7 @@ func init() {
 // NewTextFileCollector returns a new Collector exposing metrics read from files
 // in the given textfile directory.
 func NewTextFileCollector() (Collector, error) {
-	c := &textFileCollector{*textFileDirectory}
-	return c, nil
+	return &textFileCollector{*textFileDirectory}, nil
 }
 
 func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric) {
@@ -60,8 +59,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 
 	allLabelNames := map[string]struct{}{}
 	for _, metric := range metricFamily.Metric {
-		labels := metric.GetLabel()
-		for _, label := range labels {
+		for _, label := range metric.Label {
 			if _, ok := allLabelNames[label.GetName()]; !ok {
 				allLabelNames[label.GetName()] = struct{}{}
 			}
@@ -70,7 +68,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 
 	for _, metric := range metricFamily.Metric {
 		if metric.TimestampMs != nil {
-			log.Warnf("Ignoring unsupported custom timestamp on textfile collector metric %v", metric)
+			slog.Warn("ignoring unsupported custom timestamp on textfile collector metric", "metric_family", metricFamily.GetName())
 		}
 
 		labels := metric.GetLabel()
@@ -89,26 +87,22 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 					break
 				}
 			}
-			if present == false {
+			if !present {
 				names = append(names, k)
 				values = append(values, "")
 			}
 		}
 
-		metricType := metricFamily.GetType()
-		switch metricType {
+		switch metricFamily.GetType() {
 		case dto.MetricType_COUNTER:
 			valType = prometheus.CounterValue
 			val = metric.Counter.GetValue()
-
 		case dto.MetricType_GAUGE:
 			valType = prometheus.GaugeValue
 			val = metric.Gauge.GetValue()
-
 		case dto.MetricType_UNTYPED:
 			valType = prometheus.UntypedValue
 			val = metric.Untyped.GetValue()
-
 		case dto.MetricType_SUMMARY:
 			quantiles := map[float64]float64{}
 			for _, q := range metric.Summary.Quantile {
@@ -142,7 +136,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 		default:
 			panic("unknown metric type")
 		}
-		if metricType == dto.MetricType_GAUGE || metricType == dto.MetricType_COUNTER || metricType == dto.MetricType_UNTYPED {
+		if valType == prometheus.GaugeValue || valType == prometheus.CounterValue || valType == prometheus.UntypedValue {
 			ch <- prometheus.MustNewConstMetric(
 				prometheus.NewDesc(
 					*metricFamily.Name,
@@ -156,9 +150,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 }
 
 func (c *textFileCollector) exportMTimes(mtimes map[string]time.Time, ch chan<- prometheus.Metric) {
-	// Export the mtimes of the successful files.
 	if len(mtimes) > 0 {
-		// Sorting is needed for predictable output comparison in tests.
 		filenames := make([]string, 0, len(mtimes))
 		for filename := range mtimes {
 			filenames = append(filenames, filename)
@@ -166,7 +158,7 @@ func (c *textFileCollector) exportMTimes(mtimes map[string]time.Time, ch chan<- 
 		sort.Strings(filenames)
 
 		for _, filename := range filenames {
-			mtime := float64(mtimes[filename].UnixNano() / 1e9)
+			mtime := float64(mtimes[filename].UnixNano() / int64(time.Second))
 			ch <- prometheus.MustNewConstMetric(mtimeDesc, prometheus.GaugeValue, mtime, filename)
 		}
 	}
@@ -174,14 +166,13 @@ func (c *textFileCollector) exportMTimes(mtimes map[string]time.Time, ch chan<- 
 
 // Update implements the Collector interface.
 func (c *textFileCollector) Update(ch chan<- prometheus.Metric) error {
-	error := 0.0
+	var scrapeError float64
 	mtimes := map[string]time.Time{}
 
-	// Iterate over files and accumulate their metrics.
-	files, err := ioutil.ReadDir(c.path)
+	files, err := os.ReadDir(c.path)
 	if err != nil && c.path != "" {
-		log.Errorf("Error reading textfile collector directory %q: %s", c.path, err)
-		error = 1.0
+		slog.Error("error reading textfile collector directory", "dir", c.path, "err", err)
+		scrapeError = 1
 	}
 
 fileLoop:
@@ -192,23 +183,23 @@ fileLoop:
 		path := filepath.Join(c.path, f.Name())
 		file, err := os.Open(path)
 		if err != nil {
-			log.Errorf("Error opening %q: %v", path, err)
-			error = 1.0
+			slog.Error("error opening", "path", path, "err", err)
+			scrapeError = 1
 			continue
 		}
 		var parser expfmt.TextParser
 		parsedFamilies, err := parser.TextToMetricFamilies(file)
-		file.Close()
+		_ = file.Close()
 		if err != nil {
-			log.Errorf("Error parsing %q: %v", path, err)
-			error = 1.0
+			slog.Error("error parsing", "path", path, "err", err)
+			scrapeError = 1
 			continue
 		}
 		for _, mf := range parsedFamilies {
 			for _, m := range mf.Metric {
 				if m.TimestampMs != nil {
-					log.Errorf("Textfile %q contains unsupported client-side timestamps, skipping entire file", path)
-					error = 1.0
+					slog.Error("textfile contains unsupported client-side timestamps, skipping entire file", "path", path)
+					scrapeError = 1
 					continue fileLoop
 				}
 			}
@@ -220,7 +211,10 @@ fileLoop:
 
 		// Only set this once it has been parsed and validated, so that a
 		// failure does not appear fresh.
-		mtimes[f.Name()] = f.ModTime()
+		info, infoErr := f.Info()
+		if infoErr == nil {
+			mtimes[f.Name()] = info.ModTime()
+		}
 
 		for _, mf := range parsedFamilies {
 			convertMetricFamily(mf, ch)
@@ -229,14 +223,13 @@ fileLoop:
 
 	c.exportMTimes(mtimes, ch)
 
-	// Export if there were errors.
 	ch <- prometheus.MustNewConstMetric(
 		prometheus.NewDesc(
 			"node_textfile_scrape_error",
 			"1 if there was an error opening or reading a file, 0 otherwise",
 			nil, nil,
 		),
-		prometheus.GaugeValue, error,
+		prometheus.GaugeValue, scrapeError,
 	)
 	return nil
 }

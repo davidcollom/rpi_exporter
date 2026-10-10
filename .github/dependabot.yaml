@@ -1,0 +1,53 @@
+---
+# Dependabot keeps the toolchain, base images and Actions current.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+
+version: 2
+updates:
+  # Go module upgrades - keeping direct + transitive dependencies current.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    rebase-strategy: disabled
+    # Required for go 1.27 toolchain bumps to be opened automatically.
+    allow:
+      - dependency-type: direct
+      - dependency-type: indirect
+    groups:
+      prometheus:
+        patterns:
+          - "github.com/prometheus/*"
+      kingpin:
+        patterns:
+          - "github.com/alecthomas/kingpin*"
+      all-dependencies:
+        patterns: ["*"]
+
+  # Dockerfile base images.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 3
+    rebase-strategy: disabled
+
+  # GitHub Actions used by .github/workflows/*.yaml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
