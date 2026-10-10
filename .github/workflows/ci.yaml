@@ -222,22 +222,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # For a user-owned package, the endpoint is
+          # /user/packages/{package_type}/{package_name} — no owner
+          # prefix in the path. For an org-owned package it would be
+          # /orgs/{org}/packages/{package_type}/{package_name}.
           package_name="rpi_exporter"
           owner="${GITHUB_REPOSITORY%/*}"
-          # gh api supports `--silent` but not `--output`/`--write-out`
-          # (those are curl flags). We log a clear status line and let
-          # any non-2xx fail the step so we know the publish failed.
-          http_code=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -X PATCH \
-            "/user/packages/container/${owner}%2F${package_name}" \
-            -f visibility=public \
-            --silent \
-            --include \
-            -i 2>/dev/null \
-            | head -n1 \
-            | awk '{print $2}')
-          echo "GHCR ${owner}/${package_name} visibility=public (http ${http_code})"
+          if [ "${owner}" = "davidcollom" ]; then
+            # user namespace
+            endpoint="/user/packages/container/${package_name}"
+          else
+            endpoint="/orgs/${owner}/packages/container/${package_name}"
+          fi
+          # The API may take a few seconds to become aware of a freshly
+          # pushed image; retry on 404 for up to 30s.
+          http_code=""
+          for i in 1 2 3 4 5 6; do
+            http_code=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -X PATCH \
+              "${endpoint}" \
+              -f visibility=public \
+              --silent \
+              --include \
+              -i 2>/dev/null \
+              | head -n1 \
+              | awk '{print $2}')
+            echo "GHCR ${owner}/${package_name} visibility=public (http ${http_code})"
+            case "${http_code}" in
+              2*) break ;;
+              404) sleep 5 ;;
+              *) break ;;
+            esac
+          done
           case "${http_code}" in
             2*) ;;
             *) echo "::error::GHCR visibility PATCH returned HTTP ${http_code}"; exit 1 ;;
