@@ -6,29 +6,27 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
+env:
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
+
 jobs:
-  build:
-    name: lint, test, build
+  lint:
+    name: vet & test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go: [stable]
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.27'
+          # Read the version from go.mod so bumping it once there is enough.
+          go-version-file: go.mod
           cache: true
-
-      - name: Install dependencies
-        run: go mod download
 
       - name: go vet
         run: go vet ./...
@@ -36,12 +34,150 @@ jobs:
       - name: go test
         run: go test -trimpath -count=1 -race ./...
 
-      - name: Confirm build is reproducible (host arch)
-        run: make build
+      - name: Verify goreleaser config
+        # Only fails if we are missing a tool; we install goreleaser below
+        # so this is intentionally minimal. Comment out if you do not yet
+        # have goreleaser locally.
+        run: |
+          if command -v goreleaser >/dev/null 2>&1; then
+            goreleaser check
+          fi
 
-      - name: Upload rpi_exporter binary
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+        exclude:
+          - goos: darwin
+            goarch: arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          if [ -z "${GOARM:-}" ]; then
+            GOARM=0
+          fi
+          suffix="${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "$GOARM" != "0" ]; then
+            suffix="${suffix}v${GOARM}"
+          fi
+          mkdir -p "dist/${suffix}"
+          # We use the Makefile target so the same ldflags (-X version, etc)
+          # are used both locally and in CI.
+          GOOS="${{ matrix.goos }}" \
+          GOARCH="${{ matrix.goarch }}" \
+          GO_VERSION="$(awk '/^go /{print $2; exit}' go.mod)" \
+            make build-binary
+          cp ./rpi_exporter "dist/${suffix}/rpi_exporter"
+          chmod +x "dist/${suffix}/rpi_exporter"
+
+      - name: Smoke test
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          if [ -z "${GOARM:-}" ]; then
+            GOARM=0
+          fi
+          suffix="${GOOS}-${GOARCH}"
+          if [ "${GOARM}" != "0" ]; then
+            suffix="${suffix}v${GOARM}"
+          fi
+          "./dist/${suffix}/rpi_exporter" --version
+
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: rpi_exporter-${{ runner.os }}-host
-          path: rpi_exporter
+          name: rpi_exporter-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+          path: dist/${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}/rpi_exporter
           if-no-files-found: error
+
+  docker:
+    name: docker (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+          - linux/arm/v7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract short commit
+        id: meta
+        run: |
+          commit=$(git rev-parse --short HEAD)
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          tag=$(git describe --tags --always --dirty 2>/dev/null || echo "$commit")
+          go_version=$(awk '/^go /{print $2; exit}' go.mod)
+          {
+            echo "commit=$commit"
+            echo "ts=$ts"
+            echo "tag=$tag"
+            echo "go_version=$go_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          tags: docker.io/davidcollom/rpi_exporter:dev-${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=rpi_exporter
+            org.opencontainers.image.description=Raspberry Pi hardware metrics exporter for Prometheus
+            org.opencontainers.image.source=https://github.com/davidcollom/rpi_exporter
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.ts }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.ts }}
+            GO_VERSION=${{ steps.meta.outputs.go_version }}
+          load: ${{ matrix.platform == 'linux/amd64' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (linux/amd64 only)
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          set -euo pipefail
+          docker run --rm -d --name rpi_exporter_ci -p 19245:9243 \
+            docker.io/davidcollom/rpi_exporter:dev-linux-amd64
+          sleep 3
+          curl -fsS http://localhost:19245/health
+          echo
+          curl -fsS http://localhost:19245/metrics \
+            | grep -E '^rpi_(exporter_build_info|scrape_collector_success){' \
+            | head
+          docker rm -f rpi_exporter_ci

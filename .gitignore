@@ -21,3 +21,6 @@
 # Editor / IDE
 .idea/
 .vscode/
+
+# GoReleaser output directory.
+/dist

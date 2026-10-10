@@ -1,26 +1,199 @@
 ---
 name: release
 
-
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'How to bump the version (resolved via svu)'
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+          - custom
+      version:
+        description: 'Version to release. Used only when release_type=custom. Must be a semver like `v1.2.3`.'
+        required: false
+        type: string
+        default: ''
+      publish:
+        description: 'Publish (push to Docker Hub + create GitHub Release). Uncheck for a dry-run snapshot.'
+        required: true
+        type: boolean
+        default: true
+      prerelease:
+        description: 'Mark the GitHub Release as a pre-release.'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
-  attestations: write
   packages: write
+  attestations: write
+  id-token: write
 
 env:
   IMAGE_NAME: davidcollom/rpi_exporter
   PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
 
 jobs:
-  docker:
-    name: publish multi-arch image
+  validate:
+    name: lint & pre-flight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # Read the version from go.mod so this workflow never has to
+          # be edited when the toolchain is bumped.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install GoReleaser + svu + syft
+        run: |
+          go install github.com/goreleaser/goreleaser/v2@latest
+          go install github.com/caarlos0/svu/v3@latest
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
+
+      - name: go vet & test
+        run: |
+          go vet ./...
+          go test -trimpath -count=1 ./...
+
+      - name: Verify working tree is clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree has uncommitted changes; refusing to release."
+            exit 1
+          fi
+
+      - name: Validate goreleaser config
+        run: goreleaser check
+
+  release-binaries:
+    name: goreleaser (binaries, archives, SBOM, GitHub Release)
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install GoReleaser + svu + syft
+        run: |
+          go install github.com/goreleaser/goreleaser/v2@latest
+          go install github.com/caarlos0/svu/v3@latest
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
+
+      - name: Resolve version via svu
+        id: version
+        run: |
+          release_type="${{ inputs.release_type }}"
+          custom="${{ inputs.version }}"
+
+          case "$release_type" in
+            custom)
+              if [ -z "$custom" ]; then
+                echo "::error::release_type=custom requires the version input."
+                exit 1
+              fi
+              case "$custom" in
+                v*) ver="$custom" ;;
+                *)   ver="v$custom" ;;
+              esac
+              ;;
+            prerelease) ver=$(svu prerelease) ;;
+            patch)      ver=$(svu patch)      ;;
+            minor)      ver=$(svu minor)      ;;
+            major)      ver=$(svu major)      ;;
+            *)
+              echo "::error::unknown release_type=$release_type"
+              exit 1
+              ;;
+          esac
+
+          echo "version=$ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the release commit (so the GitHub Release has a "Releases" target)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse --verify "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Tag ${VERSION} already exists; will reuse it."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "${VERSION}" -m "Release ${VERSION}"
+            git push origin "${VERSION}"
+          fi
+
+      - name: Resolve goreleaser args
+        id: args
+        run: |
+          args="release --clean --release-version ${{ steps.version.outputs.version }}"
+          if [ "${{ inputs.publish }}" != "true" ]; then
+            args="$args --snapshot"
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: ${{ steps.args.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mark GitHub Release as pre-release (if requested)
+        if: inputs.publish && inputs.prerelease
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$VERSION" --prerelease
+
+  release-image:
+    name: docker (multi-arch)
+    needs: [validate, release-binaries]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -34,38 +207,64 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Login to GitHub Container Registry (keyless cosign works with OIDC)
+        uses: docker/login-action@v3
         with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-arch manifest
-        id: build
+      - name: Resolve metadata
+        id: meta
+        env:
+          VERSION: ${{ needs.release-binaries.outputs.version }}
+        run: |
+          commit=$(git rev-parse --short HEAD)
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          go_version=$(awk '/^go /{print $2; exit}' go.mod)
+          major_minor=$(echo "$VERSION" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')
+          {
+            echo "tag=$VERSION"
+            echo "commit=$commit"
+            echo "ts=$ts"
+            echo "go_version=$go_version"
+            echo "major_minor=$major_minor"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            docker.io/davidcollom/rpi_exporter:${{ steps.meta.outputs.tag }}
+            docker.io/davidcollom/rpi_exporter:${{ steps.meta.outputs.major_minor }}
+            docker.io/davidcollom/rpi_exporter:latest
+          labels: |
+            org.opencontainers.image.title=rpi_exporter
+            org.opencontainers.image.description=Raspberry Pi hardware metrics exporter for Prometheus
+            org.opencontainers.image.source=https://github.com/davidcollom/rpi_exporter
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=David Collom
+            org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.ts }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.ts }}
+            GO_VERSION=${{ steps.meta.outputs.go_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Create source provenance attestation
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+      - name: Generate keyless cosign provenance for the image
+        uses: sigstore/cosign-installer@v3
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            rpi_exporter
+      - name: Sign image with keyless cosign
+        run: |
+          cosign sign --yes \
+            --registry-username="${{ github.actor }}" \
+            --registry-password="${{ secrets.GITHUB_TOKEN }}" \
+            docker.io/davidcollom/rpi_exporter@${{ steps.meta.outputs.commit }}

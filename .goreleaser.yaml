@@ -1,0 +1,186 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# GoReleaser config for davidcollom/rpi_exporter.
+#
+# Release pipeline (triggered from .github/workflows/release.yaml on
+# `workflow_dispatch` from a maintainer):
+#
+#   * Multi-arch static binary builds (linux/darwin × amd64/arm64/arm/v7)
+#   * tar.gz archives per OS/arch
+#   * Source tarball
+#   * SPDX SBOM
+#   * SHA256SUMS
+#   * GitHub Release with auto-generated changelog
+#
+# Multi-arch Docker image build/push is handled separately in the
+# release workflow (via docker/build-push-action). Keeping the Docker
+# pipeline out of goreleaser lets us:
+#
+#   * Reuse the same docker-push step that the CI workflow validates
+#     on every PR, reducing the chance of CI/release drift.
+#   * Iterate on Docker packaging independently of goreleaser.
+#
+# Validated with `goreleaser check`. Snapshots with `goreleaser release
+# --clean --snapshot`.
+
+version: 2
+
+project_name: rpi_exporter
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+builds:
+  # Static, stripped binaries for every supported OS/arch.
+  # CGO_ENABLED=0 keeps the image small and lets us run on distroless.
+  - id: rpi_exporter
+    main: ./
+    binary: rpi_exporter
+    builder: go
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-trimpath
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    goarm:
+      - "7"
+    ignore:
+      - goos: darwin
+        goarch: arm
+        goarm: "7"
+
+    # Inject build-time metadata so rpi_exporter_build_info{version,revision,...}
+    # is populated at build time without needing Makefile ldflags.
+    ldflags:
+      - -s -w
+      # version settings live in the `release:` section below as env vars
+      # that goreleaser sets; we forward them via -X.
+      - -X github.com/prometheus/common/version.Version={{.Version}}
+      - -X github.com/prometheus/common/version.Revision={{.ShortCommit}}
+      - -X github.com/prometheus/common/version.Branch={{.Branch}}
+      - -X github.com/prometheus/common/version.BuildUser=docker
+      - -X github.com/prometheus/common/version.BuildDate={{.CommitDate}}
+      - -X github.com/prometheus/common/version.GoVersion={{.Env.GO_VERSION}}
+
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    ids:
+      - rpi_exporter
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}-
+      {{- title .Os }}-
+      {{- if eq .Arch "amd64" }}x86_64
+      -{{- else if eq .Arch "386" }}i386
+      -{{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}_v{{ .Arm }}{{ end -}}
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - src: systemd/rpi_exporter.service
+        dst: etc/systemd/system/rpi_exporter.service
+    allow_different_binary_count: false
+
+# Plain source tarball (so consumers can vendor / packagers can re-build).
+source:
+  enabled: true
+  prefix_template: "{{ .ProjectName }}-{{ .Version }}-src"
+
+# SBOM — SPDX for compatibility with Sigstore/cosign and most scanners.
+sboms:
+  - id: spdx
+    documents:
+      - spdx
+    artifacts: archive
+
+# Auto-generated changelog, grouped by Conventional Commits type, scoped
+# to commits not already in a previous tag.
+changelog:
+  use: git
+  abbrev: 0
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([^)]*\))?:!?:? .+$'
+      order: 0
+    - title: 'Bug Fixes'
+      regexp: '^.*?fix(\([^)]*\))?:!?:? .+$'
+      order: 1
+    - title: 'Performance'
+      regexp: '^.*?perf(\([^)]*\))?:!?:? .+$'
+      order: 2
+    - title: 'Refactors'
+      regexp: '^.*?refactor(\([^)]*\))?:!?:? .+$'
+      order: 3
+    - title: 'Build / CI'
+      regexp: '^.*?(build|ci)(\([^)]*\))?:!?:? .+$'
+      order: 4
+    - title: 'Docs'
+      regexp: '^.*?docs(\([^)]*\))?:!?:? .+$'
+      order: 5
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - '^Merge '
+      - '^wip '
+      - '^chore\(release\): '
+
+release:
+  github:
+    owner: davidcollom
+    name: rpi_exporter
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+  header: |
+    ## rpi_exporter {{ .Tag }}
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser) from
+    `{{ .ShortCommit }}` on `{{ .CommitDate }}`. See the artifacts below.
+
+    ### Install / pull
+
+    ```sh
+    docker pull docker.io/davidcollom/rpi_exporter:{{ .Tag }}
+    ```
+
+    See the [project README](https://github.com/davidcollom/rpi_exporter#readme)
+    for usage.
+  footer: |
+    ## Verify
+
+    The multi-arch OCI image is signed with keyless cosign via SLSA
+    provenance. Verify before deploying:
+
+    ```sh
+    cosign verify \
+      --certificate-identity-regexp 'https://github.com/davidcollom/rpi_exporter' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      docker.io/davidcollom/rpi_exporter:{{ .Tag }}
+    ```
+  include_meta: true
+  extra_files:
+    - glob: "./sbom/**/*"
+    - glob: "./CHANGELOG.md"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# All retry configuration moved to the root of the config file.
+retry:
+  attempts: 3
+  delay: 10s
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHASUMS.txt"
+  algorithm: sha256

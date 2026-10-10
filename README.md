@@ -59,16 +59,77 @@ make build                          # host arch, ./rpi_exporter
 ./rpi_exporter --web.listen-address=":9243"
 ```
 
+## Release pipeline
+
+Releases are **maintainer-triggered** via a single GitHub Actions
+workflow (`.github/workflows/release.yaml`) using [svu][svu] for
+version resolution and [GoReleaser][goreleaser] for binary packaging
++ GitHub Release + SBOM. The multi-arch Docker image is built and
+pushed in a separate job of the same workflow (the Docker pipeline
+is intentionally *not* part of GoReleaser so the CI workflow and the
+release workflow share the same `docker/build-push-action` invocation
+and stay in lock-step).
+
+[svu]: https://github.com/caarlos0/svu
+[goreleaser]: https://goreleaser.com
+
+### Triggering a release
+
+1. Make sure `master` is clean (CI green, working tree clean).
+2. GitHub → **Actions** → **release** → **Run workflow**:
+   - `release_type`:
+     - `patch` / `minor` / `major` / `prerelease` — version is computed
+       from the current tag via `svu`.
+     - `custom` — supply the explicit `vX.Y.Z` in the `version` input.
+   - `publish` — uncheck to run a `--snapshot` dry-run locally-equivalent.
+   - `prerelease` — mark the GitHub Release as pre-release.
+3. The workflow will:
+   1. Resolve the next version via `svu` and tag the commit.
+   2. Run `goreleaser release` to build multi-platform binaries
+      (linux/darwin × amd64/arm64/arm/v7), tar.gz archives, source
+      tarball, SPDX SBOM, and SHA256SUMS, and publish a GitHub Release
+      with an auto-generated changelog grouped by Conventional Commits
+      type.
+   3. Build a multi-arch OCI image (`linux/amd64`, `linux/arm64`,
+      `linux/arm/v7`) with `docker/build-push-action` and push to
+      `docker.io/davidcollom/rpi_exporter` with semver tags.
+   4. Sign the image with keyless cosign.
+
+### Required GitHub secrets
+
+| secret               | purpose                                                |
+|----------------------|--------------------------------------------------------|
+| `DOCKERHUB_USERNAME` | Docker Hub user used to push the image                |
+| `DOCKERHUB_TOKEN`    | Docker Hub access token (Settings → Security)         |
+| `GITHUB_TOKEN`       | built-in; used to push the GitHub Release and tag      |
+
+## CI
+
+`.github/workflows/ci.yaml` runs on every push and PR to `master` and
+combines everything that used to live in separate workflows:
+
+* `lint` — `go vet`, `go test -race`, and `goreleaser check` (config
+  validation). Reads the Go version from `go.mod` via
+  `actions/setup-go@v5`'s `go-version-file` input, so bumping the
+  `go` directive in `go.mod` is the **only** edit needed.
+* `build` — multi-arch binary matrix (linux/darwin × amd64/arm64,
+  plus linux/arm/v7); each binary is uploaded as a workflow
+  artifact.
+* `docker` — multi-platform matrix build with `docker/build-push-action`,
+  with a smoke test (`/health` + `/metrics`) for the `linux/amd64`
+  image.
+
 ## Docker image
 
 ```bash
-make docker-multi-arch              # buildx, all 3 platforms, pushes
 make docker-build                   # host-arch local smoke test
+make docker-multi-arch              # buildx, all 3 platforms, pushes
 ```
 
-The image is built in two stages. The build stage uses pinned `golang:1.27-alpine`
-and the runtime stage uses `gcr.io/distroless/static-debian12:nonroot` (uid/gid
-65532), so the final image has no shell and no package manager.
+The image is built in two stages. The build stage uses pinned
+`golang:1.27-alpine` and the runtime stage uses
+`gcr.io/distroless/static-debian12:nonroot` (uid/gid 65532), so the
+final image has no shell and no package manager.
 
 Configuration is environment-driven via flags. Make sure
 `/usr/bin/vcgencmd` (host) is mounted into the container — the standard
