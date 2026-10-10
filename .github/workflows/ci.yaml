@@ -93,6 +93,11 @@ jobs:
           chmod +x "dist/${suffix}/rpi_exporter"
 
       - name: Smoke test
+        # Only run the binary on the runner's native architecture
+        # (linux/amd64). Cross-compiled targets (linux/arm64, linux/arm/v7,
+        # darwin/*) would just produce "Exec format error" — the build
+        # itself is the verification for those.
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -106,6 +111,28 @@ jobs:
             suffix="${suffix}v${GOARM}"
           fi
           "./dist/${suffix}/rpi_exporter" --version
+
+      - name: Verify cross-compiled artefact
+        # For non-host targets just confirm the file was produced and is
+        # non-empty. We rely on the build + `--version` smoke test on
+        # linux/amd64 for actual functionality verification.
+        if: matrix.goos != 'linux' || matrix.goarch != 'amd64'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          if [ -z "${GOARM:-}" ]; then
+            GOARM=0
+          fi
+          suffix="${GOOS}-${GOARCH}"
+          if [ "${GOARM}" != "0" ]; then
+            suffix="${suffix}v${GOARM}"
+          fi
+          binary="dist/${suffix}/rpi_exporter"
+          test -x "$binary" || { echo "::error::$binary is not executable"; exit 1; }
+          size=$(wc -c < "$binary" | tr -d ' ')
+          echo "  $binary built OK (${size} bytes)"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
