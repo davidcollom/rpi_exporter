@@ -181,13 +181,20 @@ jobs:
 
       # Push only on push to the default branch — PRs run a build-only
       # smoke test against the loaded amd64 image.
+      #
+      # The 'docker' exporter can't load multi-platform manifest lists,
+      # so on PRs we build only linux/amd64 and load it into the daemon
+      # for the smoke test; on push we build all three platforms and push
+      # the multi-arch manifest to GHCR, then pull amd64 back for the
+      # smoke test.
       - name: Build & push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ github.event_name == 'push' && env.PLATFORMS || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
           tags: |
             ${{ env.GHCR_IMAGE }}:dev
             ${{ env.GHCR_IMAGE }}:dev-${{ steps.meta.outputs.commit }}
@@ -204,7 +211,6 @@ jobs:
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.ts }}
             GO_VERSION=${{ steps.meta.outputs.go_version }}
-          load: ${{ github.event_name != 'push' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -228,10 +234,17 @@ jobs:
           echo "GHCR ${owner}/${package_name} visibility=public (http ${status})"
 
       - name: Smoke test
+        # PRs use the loaded image; pushes pull the just-published image
+        # back from GHCR so we verify the actual pushed artifact.
         env:
-          IMAGE: ${{ env.GHCR_IMAGE }}:dev
+          IMAGE: ${{ github.event_name == 'push' && format('{0}:dev', env.GHCR_IMAGE) || 'rpi_exporter_ci_smoke' }}
         run: |
           set -euo pipefail
+          if [ "${{ github.event_name }}" != "push" ]; then
+            docker tag "$IMAGE" "${{ env.GHCR_IMAGE }}:dev"
+          else
+            docker pull --platform linux/amd64 "$IMAGE"
+          fi
           docker rm -f rpi_exporter_ci 2>/dev/null || true
           docker run --rm -d --name rpi_exporter_ci -p 19245:9243 "$IMAGE"
           sleep 3
