@@ -30,6 +30,12 @@ on:
         required: false
         type: boolean
         default: false
+  # Also support tag-push as an alternative trigger: a maintainer can
+  # `git tag v1.2.3 && git push origin v1.2.3` and the release fires
+  # automatically. workflow_dispatch remains available for ad-hoc runs.
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 concurrency:
   group: release
@@ -41,9 +47,17 @@ permissions:
   attestations: write
   id-token: write
 
+# secrets.X is not allowed in step-level `if:`. Compute once at the
+# workflow level whether the Docker Hub credentials are configured and
+# use env.DOCKERHUB_PUSH to gate the optional Docker Hub steps. The
+# value of this env var is a boolean string ("true"/"false"), not the
+# secret itself.
 env:
   IMAGE_NAME: davidcollom/rpi_exporter
   PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
+  DOCKERHUB_REPO: docker.io/davidcollom/rpi_exporter
+  GHCR_REPO: ghcr.io/davidcollom/rpi_exporter
+  DOCKERHUB_PUSH: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
 
 jobs:
   validate:
@@ -109,37 +123,49 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
             | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
 
-      - name: Resolve version via svu
+      - name: Resolve version
         id: version
         run: |
-          release_type="${{ inputs.release_type }}"
-          custom="${{ inputs.version }}"
-
-          case "$release_type" in
-            custom)
-              if [ -z "$custom" ]; then
-                echo "::error::release_type=custom requires the version input."
+          # Two trigger paths:
+          #   1. workflow_dispatch  - use svu (with optional custom override)
+          #   2. push tag (v*)        - use github.ref_name (the pushed tag)
+          if [ -n "${{ inputs.release_type }}" ]; then
+            release_type="${{ inputs.release_type }}"
+            custom="${{ inputs.version }}"
+            case "$release_type" in
+              custom)
+                if [ -z "$custom" ]; then
+                  echo "::error::release_type=custom requires the version input."
+                  exit 1
+                fi
+                case "$custom" in
+                  v*) ver="$custom" ;;
+                  *)   ver="v$custom" ;;
+                esac
+                ;;
+              prerelease) ver=$(svu prerelease) ;;
+              patch)      ver=$(svu patch)      ;;
+              minor)      ver=$(svu minor)      ;;
+              major)      ver=$(svu major)      ;;
+              *)
+                echo "::error::unknown release_type=$release_type"
                 exit 1
-              fi
-              case "$custom" in
-                v*) ver="$custom" ;;
-                *)   ver="v$custom" ;;
-              esac
-              ;;
-            prerelease) ver=$(svu prerelease) ;;
-            patch)      ver=$(svu patch)      ;;
-            minor)      ver=$(svu minor)      ;;
-            major)      ver=$(svu major)      ;;
-            *)
-              echo "::error::unknown release_type=$release_type"
-              exit 1
-              ;;
-          esac
+                ;;
+            esac
+          else
+            # Push-tag trigger: github.ref_name is the tag (e.g. v1.0.0)
+            ver="${GITHUB_REF_NAME}"
+            case "$ver" in
+              v*) ;;
+              *) echo "::error::pushed ref $ver is not a v-prefixed semver tag"; exit 1 ;;
+            esac
+          fi
 
           echo "version=$ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
-      - name: Tag the release commit (so the GitHub Release has a "Releases" target)
+      - name: Ensure release tag exists
+        if: github.event_name == 'workflow_dispatch'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -156,7 +182,10 @@ jobs:
         id: args
         run: |
           args="release --clean --release-version ${{ steps.version.outputs.version }}"
-          if [ "${{ inputs.publish }}" != "true" ]; then
+          # Only honour inputs.publish when the workflow was triggered
+          # manually. Tag-push releases always publish.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "${{ inputs.publish }}" != "true" ]; then
             args="$args --snapshot"
           fi
           echo "args=$args" >> "$GITHUB_OUTPUT"
@@ -171,7 +200,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mark GitHub Release as pre-release (if requested)
-        if: inputs.publish && inputs.prerelease
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.publish && inputs.prerelease
         env:
           VERSION: ${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -180,7 +211,10 @@ jobs:
   release-image:
     name: docker (multi-arch)
     needs: [validate, release-binaries]
-    if: inputs.publish
+    # Run on workflow_dispatch (when publish=true) and on tag-push.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.publish) ||
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -202,12 +236,16 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
+        if: env.DOCKERHUB_PUSH == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Login to GitHub Container Registry (keyless cosign works with OIDC)
+      - name: Login to GitHub Container Registry
+        # GITHUB_TOKEN is always available in Actions, so the GHCR push is
+        # unconditional. The optional Docker Hub push happens when both
+        # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are configured.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -231,7 +269,12 @@ jobs:
             echo "major_minor=$major_minor"
           } >> "$GITHUB_OUTPUT"
 
+      # The same build is pushed to GHCR (always) and Docker Hub (when
+      # both Docker Hub secrets are present). A single multi-arch build
+      # produces a single manifest reused across both registries via
+      # a shared cache mount.
       - name: Build and push multi-arch image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -239,9 +282,9 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: |
-            docker.io/davidcollom/rpi_exporter:${{ steps.meta.outputs.tag }}
-            docker.io/davidcollom/rpi_exporter:${{ steps.meta.outputs.major_minor }}
-            docker.io/davidcollom/rpi_exporter:latest
+            ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.tag }}
+            ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.major_minor }}
+            ${{ env.GHCR_REPO }}:latest
           labels: |
             org.opencontainers.image.title=rpi_exporter
             org.opencontainers.image.description=Raspberry Pi hardware metrics exporter for Prometheus
@@ -259,12 +302,59 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Generate keyless cosign provenance for the image
+      # Re-tag the GHCR manifest for Docker Hub. We use `docker buildx
+      # imagetools create` (built into the runner, no extra install) to
+      # re-push the same multi-arch manifest under the docker.io path
+      # so the two registries stay in lock-step without rebuilding.
+      - name: Mirror to Docker Hub
+        if: env.DOCKERHUB_PUSH == 'true'
+        run: |
+          set -euo pipefail
+          for suffix in "${{ steps.meta.outputs.tag }}" "${{ steps.meta.outputs.major_minor }}" latest; do
+            echo "Mirroring ${{ env.GHCR_REPO }}:${suffix} -> ${{ env.DOCKERHUB_REPO }}:${suffix}..."
+            docker buildx imagetools create \
+              --tag "${{ env.DOCKERHUB_REPO }}:${suffix}" \
+              "${{ env.GHCR_REPO }}:${suffix}"
+          done
+
+      - name: Make GHCR package public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="${GITHUB_REPOSITORY%/*}"
+          status=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -X PATCH \
+            "/user/packages/container/${owner}%2Frpi_exporter" \
+            -f visibility=public \
+            --silent --output /dev/null --write-out '%{http_code}')
+          echo "GHCR ${owner}/rpi_exporter visibility=public (http ${status})"
+
+      - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image with keyless cosign
+      - name: Sign GHCR image with keyless cosign
+        env:
+          VERSION: ${{ steps.meta.outputs.tag }}
         run: |
           cosign sign --yes \
             --registry-username="${{ github.actor }}" \
             --registry-password="${{ secrets.GITHUB_TOKEN }}" \
-            docker.io/davidcollom/rpi_exporter@${{ steps.meta.outputs.commit }}
+            "${{ env.GHCR_REPO }}@${{ steps.build.outputs.digest }}"
+
+      - name: Sign Docker Hub image with keyless cosign
+        if: env.DOCKERHUB_PUSH == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.tag }}
+        run: |
+          dockerhub_digest=$(docker buildx imagetools inspect \
+            "${{ env.DOCKERHUB_REPO }}:$VERSION" --raw \
+            | jq -r '.manifests[0].digest // empty')
+          if [ -z "$dockerhub_digest" ]; then
+            echo "::error::failed to compute Docker Hub digest for $VERSION"
+            exit 1
+          fi
+          cosign sign --yes \
+            --registry-username="${{ github.actor }}" \
+            --registry-password="${{ secrets.GITHUB_TOKEN }}" \
+            "${{ env.DOCKERHUB_REPO }}@$dockerhub_digest"
