@@ -322,13 +322,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           owner="${GITHUB_REPOSITORY%/*}"
-          status=$(gh api \
+          http_code=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -X PATCH \
             "/user/packages/container/${owner}%2Frpi_exporter" \
             -f visibility=public \
-            --silent --output /dev/null --write-out '%{http_code}')
-          echo "GHCR ${owner}/rpi_exporter visibility=public (http ${status})"
+            --silent \
+            --include \
+            -i 2>/dev/null \
+            | head -n1 \
+            | awk '{print $2}')
+          echo "GHCR ${owner}/rpi_exporter visibility=public (http ${http_code})"
+          case "${http_code}" in
+            2*) ;;
+            *) echo "::error::GHCR visibility PATCH returned HTTP ${http_code}"; exit 1 ;;
+          esac
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
