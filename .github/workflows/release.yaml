@@ -85,6 +85,17 @@ jobs:
         # shells out to it from the docker_signs block.
         uses: sigstore/cosign-installer@v3
 
+      - name: Set up Docker Buildx
+        # The default buildx driver on the GitHub Actions runner is
+        # `docker`, which doesn't support multi-platform builds. We need
+        # `docker-container` (or `kubernetes`) for goreleaser's
+        # `dockers_v2` step to build for linux/amd64, linux/arm64, and
+        # linux/arm/v7 in a single manifest.
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.20.2
+
       - name: Resolve version
         id: version
         # Branch on the trigger: on workflow_dispatch we trust the
