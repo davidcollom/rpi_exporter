@@ -161,8 +161,12 @@ jobs:
             esac
           fi
 
+          # Also surface the go.mod go directive for downstream steps.
+          go_version=$(awk '/^go /{print $2; exit}' go.mod)
+
           echo "version=$ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
 
       - name: Ensure release tag exists
         if: github.event_name == 'workflow_dispatch'
@@ -200,6 +204,10 @@ jobs:
           args: ${{ steps.args.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The .goreleaser.yaml templates reference these — feed them in
+          # so ldflags and changelog generation have the values they
+          # expect. `go-version-file: go.mod` keeps the toolchain in sync.
+          GO_VERSION: ${{ steps.version.outputs.go_version }}
 
       - name: Mark GitHub Release as pre-release (if requested)
         if: >-
