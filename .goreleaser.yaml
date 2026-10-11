@@ -96,12 +96,15 @@ source:
   enabled: true
   prefix_template: "{{ .ProjectName }}-{{ .Version }}-src"
 
-# SBOM — SPDX for compatibility with Sigstore/cosign and most scanners.
-sboms:
-  - id: spdx
-    documents:
-      - spdx
-    artifacts: archive
+# SPDX SBOM. The right combination of `id`, `documents`, and
+# `artifacts` for goreleaser v2 to publish a single SBOM file per
+# archive without colliding on the artifact name is brittle; the
+# current run fails with "404 Not Found" on the SBOM upload step
+# (the artifact is generated but the upload path goreleaser computes
+# does not match). Disable for now; we can re-enable when the right
+# combo is verified. SBOMs can still be produced via a separate
+# workflow step.
+sboms: []
 
 # Auto-generated changelog, grouped by Conventional Commits type, scoped
 # to commits not already in a previous tag.
