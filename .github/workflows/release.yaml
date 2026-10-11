@@ -181,7 +181,9 @@ jobs:
       - name: Resolve goreleaser args
         id: args
         run: |
-          args="release --clean --release-version ${{ steps.version.outputs.version }}"
+          # In goreleaser v2 the version is read from the git tag
+          # automatically; there is no --release-version flag.
+          args="release --clean"
           # Only honour inputs.publish when the workflow was triggered
           # manually. Tag-push releases always publish.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
