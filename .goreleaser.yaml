@@ -151,22 +151,29 @@ release:
     ### Install / pull
 
     ```sh
+    # Primary (free, no rate limits):
+    docker pull ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
+    # Mirrored (when DOCKERHUB_TOKEN is configured):
     docker pull docker.io/davidcollom/rpi_exporter:{{ .Tag }}
     ```
 
-    See the [project README](https://github.com/davidcollom/rpi_exporter#readme)
+    The multi-arch OCI image is signed with keyless cosign via SLSA
+    provenance. See the [project README](https://github.com/davidcollom/rpi_exporter#readme)
     for usage.
   footer: |
     ## Verify
 
     The multi-arch OCI image is signed with keyless cosign via SLSA
-    provenance. Verify before deploying:
+    provenance. The image is published to both
+    `ghcr.io/davidcollom/rpi_exporter` and
+    `docker.io/davidcollom/rpi_exporter` (when credentials are
+    configured). Verify before deploying:
 
     ```sh
     cosign verify \
       --certificate-identity-regexp 'https://github.com/davidcollom/rpi_exporter' \
       --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-      docker.io/davidcollom/rpi_exporter:{{ .Tag }}
+      ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
     ```
   include_meta: true
   extra_files:
