@@ -96,6 +96,18 @@ jobs:
           driver: docker-container
           driver-opts: image=moby/buildkit:v0.20.2
 
+      - name: Login to GHCR
+        # GHCR rejects anonymous pushes (the 403 we saw in v1.0.1 was
+        # exactly this). The GITHUB_TOKEN env var alone is not enough —
+        # the goreleaser-spawned buildx needs a `~/.docker/config.json`
+        # or a long-lived credential helper. We use docker/login-action
+        # so the login is set up before goreleaser runs.
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Resolve version
         id: version
         # Branch on the trigger: on workflow_dispatch we trust the
