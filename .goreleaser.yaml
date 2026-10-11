@@ -92,16 +92,16 @@ source:
   enabled: true
   prefix_template: "{{ .ProjectName }}-{{ .Version }}-src"
 
-# SPDX SBOM attached to each archive.
-# `artifacts: archive` puts the SBOM next to the binary inside the
-# tarball; `documents: [spdx-json]` produces a JSON-format SPDX (the
-# `spdx` value the older config used is not a valid format and was
-# rejected silently, leading to upload 404s).
+# SPDX SBOM. We use `artifacts: source` (one SBOM total, against the
+# source tarball) rather than the default `archive` (one SBOM per
+# archive) because goreleaser uploads them all under the same name
+# (`spdx-json`), which causes 422 "already exists" errors when the
+# GitHub Release API rejects duplicate names.
 sboms:
   - id: spdx
     documents:
       - spdx-json
-    artifacts: archive
+    artifacts: source
 
 # Multi-arch OCI image. Built with the existing multi-stage
 # Dockerfile and pushed via `docker buildx build` (no separate
