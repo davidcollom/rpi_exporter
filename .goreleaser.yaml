@@ -180,7 +180,10 @@ docker_signs:
     # the signature to a local file *and* (because of --upload=true)
     # push it to the registry's OCI referrers.
     output: false
-    signature: "./cosign.sig"
+    # Plain filename (no leading ./). The leading "./" was being
+    # included in the GitHub Release asset name which the uploads API
+    # rejects with 400 Bad Content-Length.
+    signature: "cosign.sig"
     args:
       - sign
       - "${artifact}"
