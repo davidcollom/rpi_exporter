@@ -112,11 +112,15 @@ sboms:
 # line in the Dockerfile can occasionally be missed by the build
 # daemon's internal context walk. Including the two files by name
 # removes the ambiguity.
+#
+# GHCR is the primary image registry (free, no rate limits, integrated
+# with GitHub via GITHUB_TOKEN). docker.io / Docker Hub is optional
+# and can be re-enabled by adding it back to `images` and configuring
+# the DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets in repo settings.
 dockers_v2:
   - id: rpi_exporter
     dockerfile: Dockerfile.goreleaser
     images:
-      - docker.io/davidcollom/rpi_exporter
       - ghcr.io/davidcollom/rpi_exporter
     tags:
       - "{{ .Tag }}"
