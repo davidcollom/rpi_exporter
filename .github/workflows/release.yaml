@@ -85,6 +85,52 @@ jobs:
         # shells out to it from the docker_signs block.
         uses: sigstore/cosign-installer@v3
 
+      - name: Resolve version
+        id: version
+        # Branch on the trigger: on workflow_dispatch we trust the
+        # maintainer input (svu or custom version), on tag-push the
+        # pushed ref IS the version. The `release_type` input has a
+        # default value (patch) so we can't use it as the discriminator.
+        run: |
+          event="${{ github.event_name }}"
+          if [ "$event" = "workflow_dispatch" ]; then
+            release_type="${{ inputs.release_type }}"
+            custom="${{ inputs.version }}"
+            case "$release_type" in
+              custom)
+                if [ -z "$custom" ]; then
+                  echo "::error::release_type=custom requires the version input."
+                  exit 1
+                fi
+                case "$custom" in
+                  v*) ver="$custom" ;;
+                  *)   ver="v$custom" ;;
+                esac
+                ;;
+              prerelease) ver=$(svu prerelease) ;;
+              patch)      ver=$(svu patch)      ;;
+              minor)      ver=$(svu minor)      ;;
+              major)      ver=$(svu major)      ;;
+              *)
+                echo "::error::unknown release_type=$release_type"
+                exit 1
+                ;;
+            esac
+          else
+            # Push-tag trigger: github.ref_name is the tag (e.g. v1.0.1)
+            ver="${GITHUB_REF_NAME}"
+            case "$ver" in
+              v*) ;;
+              *) echo "::error::pushed ref $ver is not a v-prefixed semver tag"; exit 1 ;;
+            esac
+          fi
+
+          go_version=$(awk '/^go /{print $2; exit}' go.mod)
+
+          echo "version=$ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
+
       - name: Login to Docker Hub (if configured)
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@v3
