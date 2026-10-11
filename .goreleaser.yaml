@@ -162,12 +162,17 @@ dockers_v2:
 #     --certificate-identity-regexp 'https://github.com/davidcollom/rpi_exporter' \
 #     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
 #     ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
+#
+# `signature` is the local output path. The default `{{.Artifact}}`
+# interpolation embeds the full image ref (`ghcr.io/...:1`) which
+# contains `:` and `/` — invalid in a filename — so we strip them
+# down to a flat `<name>-<tag>-cosign.sig`.
 docker_signs:
   - id: cosign-keyless
     cmd: cosign
     artifacts: all
     output: true
-    signature: "${artifact}-cosign.sig"
+    signature: "./cosign-{{ replace .ArtifactName \":\" \"-\" }}.sig"
     args:
       - sign
       - "${artifact}"
