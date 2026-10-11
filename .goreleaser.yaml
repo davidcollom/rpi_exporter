@@ -97,11 +97,6 @@ source:
 # archive) because goreleaser uploads them all under the same name
 # (`spdx-json`), which causes 422 "already exists" errors when the
 # GitHub Release API rejects duplicate names.
-sboms:
-  - id: spdx
-    documents:
-      - spdx-json
-    artifacts: source
 
 # Multi-arch OCI image. Built with the existing multi-stage
 # Dockerfile and pushed via `docker buildx build` (no separate
