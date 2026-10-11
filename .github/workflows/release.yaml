@@ -21,7 +21,7 @@ on:
         type: string
         default: ''
       publish:
-        description: 'Publish (push to Docker Hub + create GitHub Release). Uncheck for a dry-run snapshot.'
+        description: 'Publish (push to GHCR + create GitHub Release). Uncheck for a dry-run snapshot.'
         required: true
         type: boolean
         default: true
@@ -42,14 +42,9 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  # GITHUB_TOKEN needs: contents:write (release), packages:write (GHCR),
-  # attestations:write (cosign SLSA provenance), id-token:write (cosign
-  # keyless via OIDC). When the optional DOCKERHUB_TOKEN secret is set
-  # the goreleaser-action also needs packages:write for the mirror.
+  # GITHUB_TOKEN needs: contents:write (release), packages:write (GHCR).
   contents: write
   packages: write
-  attestations: write
-  id-token: write
 
 jobs:
   goreleaser:
@@ -68,22 +63,6 @@ jobs:
           # toolchain — bumping it once in the `go` directive is enough.
           go-version-file: go.mod
           cache: true
-
-      - name: Install GoReleaser + svu + syft
-        # syft is required by goreleaser's `sboms:` step; install it
-        # next to the other go-installed tools and add the directory to
-        # $GITHUB_PATH so the goreleaser subprocess finds it.
-        run: |
-          go install github.com/goreleaser/goreleaser/v2@latest
-          go install github.com/caarlos0/svu/v3@latest
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
-          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
-
-      - name: Set up cosign for keyless signing
-        # cosign ships its own binary via this installer; goreleaser then
-        # shells out to it from the docker_signs block.
-        uses: sigstore/cosign-installer@v3
 
       - name: Set up Docker Buildx
         # The default buildx driver on the GitHub Actions runner is
@@ -154,13 +133,10 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
 
-
       - name: Run GoReleaser
         env:
           GO_VERSION: ${{ steps.version.outputs.go_version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
              && [ "${{ inputs.publish }}" != "true" ]; then
