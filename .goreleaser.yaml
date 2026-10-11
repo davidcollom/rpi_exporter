@@ -170,7 +170,7 @@ dockers_v2:
 docker_signs:
   - id: cosign-keyless
     cmd: cosign
-    artifacts: checksum
+    artifacts: images
     output: true
     signature: "./cosign.sig"
     args:
