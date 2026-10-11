@@ -134,15 +134,8 @@ jobs:
           echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
 
       - name: Run GoReleaser
-        env:
-          GO_VERSION: ${{ steps.version.outputs.go_version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             && [ "${{ inputs.publish }}" != "true" ]; then
-            goreleaser release --clean --snapshot
-          else
-            # In goreleaser v2 the version is read from the git tag
-            # automatically; there is no --release-version flag.
-            goreleaser release --clean
-          fi
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: ${{ github.event_name == 'workflow_dispatch' && inputs.publish != 'true' && 'release --clean --snapshot' || 'release --clean' }}
