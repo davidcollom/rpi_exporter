@@ -80,8 +80,12 @@ jobs:
         run: |
           go install github.com/goreleaser/goreleaser/v2@latest
           go install github.com/caarlos0/svu/v3@latest
+          # Install syft into a stable path and add it to $GITHUB_PATH
+          # so the goreleaser step (which runs in a fresh shell) can
+          # find syft when it generates the SPDX SBOM.
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
             | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
+          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
 
       - name: go vet & test
         run: |
@@ -120,8 +124,12 @@ jobs:
         run: |
           go install github.com/goreleaser/goreleaser/v2@latest
           go install github.com/caarlos0/svu/v3@latest
+          # Install syft into a stable path and add it to $GITHUB_PATH
+          # so the goreleaser step (which runs in a fresh shell) can
+          # find syft when it generates the SPDX SBOM.
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
             | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
+          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
 
       - name: Resolve version
         id: version
