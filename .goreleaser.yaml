@@ -172,7 +172,7 @@ docker_signs:
     cmd: cosign
     artifacts: all
     output: true
-    signature: "./cosign-{{ replace .ArtifactName \":\" \"-\" }}.sig"
+    signature: "./cosign-{{ .ArtifactName | replace \":\" \"-\" | replace \"/\" \"-\" }}.sig"
     args:
       - sign
       - "${artifact}"
