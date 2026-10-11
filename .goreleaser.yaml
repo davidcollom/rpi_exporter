@@ -178,7 +178,9 @@ release:
   include_meta: true
   extra_files:
     - glob: "./sbom/**/*"
-    - glob: "./CHANGELOG.md"
+    # CHANGELOG.md is rendered into the release body automatically;
+    # explicitly globbing it here would require it to exist on disk
+    # before the changelog step runs.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
