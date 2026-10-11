@@ -69,68 +69,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install GoReleaser
-        run: go install github.com/goreleaser/goreleaser/v2@latest
-
-      # gh CLI is required for the "Make GHCR package public" step in
-      # the goreleaser config (it talks to the GitHub Packages API to
-      # flip the visibility of the package after the first push).
-      - name: Install gh
+      - name: Install GoReleaser + svu + syft
+        # syft is required by goreleaser's `sboms:` step; install it
+        # next to the other go-installed tools and add the directory to
+        # $GITHUB_PATH so the goreleaser subprocess finds it.
         run: |
-          apt-get update -qq && apt-get install -y -qq gh
-          gh --version
-
-      # `go-version-file: go.mod` is what the goreleaser ldflags
-      # template references via `{{ .Env.GO_VERSION }}`. The Makefile
-      # exports it too, but in CI we set it explicitly so it reaches
-      # the goreleaser subprocess regardless of how the matrix is
-      # wired.
-      - name: Resolve version
-        id: version
-        env:
-          RELEASE_TYPE: ${{ inputs.release_type }}
-          CUSTOM: ${{ inputs.version }}
-        run: |
-          # Two trigger paths:
-          #   1. workflow_dispatch  - use svu (with optional custom override)
-          #   2. push tag (v*)        - use github.ref_name (the pushed tag)
-          if [ -n "${RELEASE_TYPE}" ]; then
-            release_type="${RELEASE_TYPE}"
-            custom="${CUSTOM:-}"
-            case "$release_type" in
-              custom)
-                if [ -z "$custom" ]; then
-                  echo "::error::release_type=custom requires the version input."
-                  exit 1
-                fi
-                case "$custom" in
-                  v*) ver="$custom" ;;
-                  *)   ver="v$custom" ;;
-                esac
-                ;;
-              prerelease) ver=$(svu prerelease) ;;
-              patch)      ver=$(svu patch)      ;;
-              minor)      ver=$(svu minor)      ;;
-              major)      ver=$(svu major)      ;;
-              *)
-                echo "::error::unknown release_type=$release_type"
-                exit 1
-                ;;
-            esac
-          else
-            # Push-tag trigger: github.ref_name is the tag (e.g. v1.0.0)
-            ver="${GITHUB_REF_NAME}"
-            case "$ver" in
-              v*) ;;
-              *) echo "::error::pushed ref $ver is not a v-prefixed semver tag"; exit 1 ;;
-            esac
-          fi
-
-          go_version=$(awk '/^go /{print $2; exit}' go.mod)
-
-          echo "version=$ver"
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
+          go install github.com/goreleaser/goreleaser/v2@latest
+          go install github.com/caarlos0/svu/v3@latest
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
+          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
 
       - name: Set up cosign for keyless signing
         # cosign ships its own binary via this installer; goreleaser then
