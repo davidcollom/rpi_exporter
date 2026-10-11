@@ -141,3 +141,8 @@ jobs:
           args: ${{ github.event_name == 'workflow_dispatch' && inputs.publish != 'true' && 'release --clean --snapshot' || 'release --clean' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The ldflags template references `{{ .Env.GO_VERSION }}`,
+          # so it must be set in the goreleaser subprocess's env. Read
+          # the version from go.mod (single source of truth for the
+          # toolchain) and pass it through.
+          GO_VERSION: ${{ steps.version.outputs.go_version }}
