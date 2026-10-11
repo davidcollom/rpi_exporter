@@ -212,6 +212,10 @@ release:
     name: rpi_exporter
   draft: false
   prerelease: auto
+  # Overwrite existing assets with the same name on re-runs. Useful
+  # when re-running a failed release (the GitHub Release object gets
+  # created early; the assets are then re-uploaded with this flag).
+  replace_existing_artifacts: true
   name_template: "{{ .Tag }}"
   header: |
     ## rpi_exporter {{ .Tag }}
