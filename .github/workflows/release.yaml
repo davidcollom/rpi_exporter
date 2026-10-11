@@ -139,3 +139,5 @@ jobs:
           distribution: goreleaser
           version: '~> v2'
           args: ${{ github.event_name == 'workflow_dispatch' && inputs.publish != 'true' && 'release --clean --snapshot' || 'release --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
