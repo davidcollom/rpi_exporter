@@ -322,18 +322,13 @@ jobs:
           VERSION: ${{ steps.meta.outputs.tag }}
         run: |
           # GHCR packages published via GITHUB_TOKEN from a public repo
-          # inherit public visibility — there is no API to PATCH visibility.
-          # We verify by attempting a public pull (no creds) which would
-          # 401 if the package were private.
-          status=$(curl -sS -o /dev/null -w '%{http_code}' \
-            "https://ghcr.io/v2/davidcollom/rpi_exporter/manifests/${VERSION}" \
-            -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-            -H "Accept: application/vnd.docker.distribution.manifest.v2+json")
-          echo "GHCR davidcollom/rpi_exporter:${VERSION} anonymous pull -> http ${status}"
-          if [ "${status}" != "200" ]; then
-            echo "::error::expected HTTP 200 from anonymous pull, got ${status}"
-            exit 1
-          fi
+          # inherit public visibility, but GHCR's REST API still requires
+          # auth. The behaviour we care about — "anyone can `docker pull`
+          # this image" — is best verified by an actual anonymous pull.
+          docker logout ghcr.io 2>/dev/null || true
+          docker pull --platform linux/amd64 \
+            "ghcr.io/davidcollom/rpi_exporter:${VERSION}"
+          echo "GHCR davidcollom/rpi_exporter:${VERSION} anonymous pull -> OK"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

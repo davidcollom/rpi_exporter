@@ -239,10 +239,17 @@ jobs:
           # GITHUB_TOKEN from a public repo inherit public visibility).
           # We try a public pull to verify.
           if [ "${{ github.event_name }}" = "push" ]; then
-            curl -fsS -o /dev/null -w "public pull: http %{http_code}\n" \
-              "https://ghcr.io/v2/davidcollom/rpi_exporter/manifests/dev" \
-              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-              -H "Authorization: Bearer QQ=="
+            # The "public pull" check below just confirms GHCR is
+            # serving the image without auth. `docker pull` already
+            # proved the manifest is reachable; the /v2/_catalog probe
+            # is a lighter independent check that the registry is up.
+            status=$(curl -sS -o /dev/null -w '%{http_code}' \
+              "https://ghcr.io/v2/davidcollom/rpi_exporter/tags/list")
+            echo "GHCR /v2/.../tags/list -> http ${status}"
+            if [ "${status}" != "200" ]; then
+              echo "::error::expected HTTP 200 from anonymous registry probe, got ${status}"
+              exit 1
+            fi
           fi
           curl -fsS http://localhost:19245/metrics \
             | grep -E '^rpi_(exporter_build_info|scrape_collector_success){' \
