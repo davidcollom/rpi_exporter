@@ -176,11 +176,11 @@ release:
       ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
     ```
   include_meta: true
-  extra_files:
-    - glob: "./sbom/**/*"
-    # CHANGELOG.md is rendered into the release body automatically;
-    # explicitly globbing it here would require it to exist on disk
-    # before the changelog step runs.
+  # The SPDX SBOM is attached to each archive as a sibling file by
+  # the `sboms:` block above (`artifacts: archive`). The release body
+  # also gets the rendered CHANGELOG automatically. We don't need any
+  # extra_files — the previous `./sbom/**/*` glob pointed at the wrong
+  # path and was returning 404 on upload.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
