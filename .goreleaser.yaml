@@ -171,7 +171,15 @@ docker_signs:
   - id: cosign-keyless
     cmd: cosign
     artifacts: images
-    output: true
+    # `output: false` is critical: with `output: true` goreleaser
+    # appends `--output=true` to cosign, which tells cosign to use
+    # the registry as the output and *not* write the local file.
+    # That makes goreleaser fail when it tries to upload the local
+    # signature as a release asset. With `output: false` goreleaser
+    # adds `--output=<signature path>`, which makes cosign write the
+    # signature to a local file *and* (because of --upload=true) push
+    # it to the registry's OCI referrers.
+    output: false
     signature: "./cosign.sig"
     args:
       - sign
