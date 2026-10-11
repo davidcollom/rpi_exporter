@@ -30,9 +30,9 @@ on:
         required: false
         type: boolean
         default: false
-  # Also support tag-push as an alternative trigger: a maintainer can
-  # `git tag v1.2.3 && git push origin v1.2.3` and the release fires
-  # automatically. workflow_dispatch remains available for ad-hoc runs.
+  # Also support tag-push: a maintainer can `git tag v1.2.3 && git push
+  # origin v1.2.3` and the release fires automatically. workflow_dispatch
+  # remains available for ad-hoc runs.
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
@@ -42,104 +42,61 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  # GITHUB_TOKEN needs: contents:write (release), packages:write (GHCR),
+  # attestations:write (cosign SLSA provenance), id-token:write (cosign
+  # keyless via OIDC). When the optional DOCKERHUB_TOKEN secret is set
+  # the goreleaser-action also needs packages:write for the mirror.
   contents: write
   packages: write
   attestations: write
   id-token: write
 
-# secrets.X is not allowed in step-level `if:`. Compute once at the
-# workflow level whether the Docker Hub credentials are configured and
-# use env.DOCKERHUB_PUSH to gate the optional Docker Hub steps. The
-# value of this env var is a boolean string ("true"/"false"), not the
-# secret itself.
-env:
-  IMAGE_NAME: davidcollom/rpi_exporter
-  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
-  DOCKERHUB_REPO: docker.io/davidcollom/rpi_exporter
-  GHCR_REPO: ghcr.io/davidcollom/rpi_exporter
-  DOCKERHUB_PUSH: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-
 jobs:
-  validate:
-    name: lint & pre-flight
+  goreleaser:
+    name: goreleaser
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          # Read the version from go.mod so this workflow never has to
-          # be edited when the toolchain is bumped.
+          # go-version-file: go.mod is the single source of truth for the
+          # toolchain — bumping it once in the `go` directive is enough.
           go-version-file: go.mod
           cache: true
 
-      - name: Install GoReleaser + svu + syft
+      - name: Install GoReleaser
+        run: go install github.com/goreleaser/goreleaser/v2@latest
+
+      # gh CLI is required for the "Make GHCR package public" step in
+      # the goreleaser config (it talks to the GitHub Packages API to
+      # flip the visibility of the package after the first push).
+      - name: Install gh
         run: |
-          go install github.com/goreleaser/goreleaser/v2@latest
-          go install github.com/caarlos0/svu/v3@latest
-          # Install syft into a stable path and add it to $GITHUB_PATH
-          # so the goreleaser step (which runs in a fresh shell) can
-          # find syft when it generates the SPDX SBOM.
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
-          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
+          apt-get update -qq && apt-get install -y -qq gh
+          gh --version
 
-      - name: go vet & test
-        run: |
-          go vet ./...
-          go test -trimpath -count=1 ./...
-
-      - name: Verify working tree is clean
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree has uncommitted changes; refusing to release."
-            exit 1
-          fi
-
-      - name: Validate goreleaser config
-        run: goreleaser check
-
-  release-binaries:
-    name: goreleaser (binaries, archives, SBOM, GitHub Release)
-    needs: validate
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install GoReleaser + svu + syft
-        run: |
-          go install github.com/goreleaser/goreleaser/v2@latest
-          go install github.com/caarlos0/svu/v3@latest
-          # Install syft into a stable path and add it to $GITHUB_PATH
-          # so the goreleaser step (which runs in a fresh shell) can
-          # find syft when it generates the SPDX SBOM.
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b "$RUNNER_TOOL_CACHE/go/bin"
-          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
-
+      # `go-version-file: go.mod` is what the goreleaser ldflags
+      # template references via `{{ .Env.GO_VERSION }}`. The Makefile
+      # exports it too, but in CI we set it explicitly so it reaches
+      # the goreleaser subprocess regardless of how the matrix is
+      # wired.
       - name: Resolve version
         id: version
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          CUSTOM: ${{ inputs.version }}
         run: |
           # Two trigger paths:
           #   1. workflow_dispatch  - use svu (with optional custom override)
           #   2. push tag (v*)        - use github.ref_name (the pushed tag)
-          if [ -n "${{ inputs.release_type }}" ]; then
-            release_type="${{ inputs.release_type }}"
-            custom="${{ inputs.version }}"
+          if [ -n "${RELEASE_TYPE}" ]; then
+            release_type="${RELEASE_TYPE}"
+            custom="${CUSTOM:-}"
             case "$release_type" in
               custom)
                 if [ -z "$custom" ]; then
@@ -169,210 +126,36 @@ jobs:
             esac
           fi
 
-          # Also surface the go.mod go directive for downstream steps.
           go_version=$(awk '/^go /{print $2; exit}' go.mod)
 
           echo "version=$ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "go_version=$go_version" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure release tag exists
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if git rev-parse --verify "refs/tags/${VERSION}" >/dev/null 2>&1; then
-            echo "Tag ${VERSION} already exists; will reuse it."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag "${VERSION}" -m "Release ${VERSION}"
-            git push origin "${VERSION}"
-          fi
-
-      - name: Resolve goreleaser args
-        id: args
-        run: |
-          # In goreleaser v2 the version is read from the git tag
-          # automatically; there is no --release-version flag.
-          args="release --clean"
-          # Only honour inputs.publish when the workflow was triggered
-          # manually. Tag-push releases always publish.
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-             && [ "${{ inputs.publish }}" != "true" ]; then
-            args="$args --snapshot"
-          fi
-          echo "args=$args" >> "$GITHUB_OUTPUT"
-
-      - name: GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: ${{ steps.args.outputs.args }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The .goreleaser.yaml templates reference these — feed them in
-          # so ldflags and changelog generation have the values they
-          # expect. `go-version-file: go.mod` keeps the toolchain in sync.
-          GO_VERSION: ${{ steps.version.outputs.go_version }}
-
-      - name: Mark GitHub Release as pre-release (if requested)
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.publish && inputs.prerelease
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$VERSION" --prerelease
-
-  release-image:
-    name: docker (multi-arch)
-    needs: [validate, release-binaries]
-    # Run on workflow_dispatch (when publish=true) and on tag-push.
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.publish) ||
-      github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        if: env.DOCKERHUB_PUSH == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login to GitHub Container Registry
-        # GITHUB_TOKEN is always available in Actions, so the GHCR push is
-        # unconditional. The optional Docker Hub push happens when both
-        # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are configured.
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve metadata
-        id: meta
-        env:
-          VERSION: ${{ needs.release-binaries.outputs.version }}
-        run: |
-          commit=$(git rev-parse --short HEAD)
-          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          go_version=$(awk '/^go /{print $2; exit}' go.mod)
-          major_minor=$(echo "$VERSION" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')
-          {
-            echo "tag=$VERSION"
-            echo "commit=$commit"
-            echo "ts=$ts"
-            echo "go_version=$go_version"
-            echo "major_minor=$major_minor"
-          } >> "$GITHUB_OUTPUT"
-
-      # The same build is pushed to GHCR (always) and Docker Hub (when
-      # both Docker Hub secrets are present). A single multi-arch build
-      # produces a single manifest reused across both registries via
-      # a shared cache mount.
-      - name: Build and push multi-arch image
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          platforms: ${{ env.PLATFORMS }}
-          push: true
-          tags: |
-            ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.tag }}
-            ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.major_minor }}
-            ${{ env.GHCR_REPO }}:latest
-          labels: |
-            org.opencontainers.image.title=rpi_exporter
-            org.opencontainers.image.description=Raspberry Pi hardware metrics exporter for Prometheus
-            org.opencontainers.image.source=https://github.com/davidcollom/rpi_exporter
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.vendor=David Collom
-            org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
-            org.opencontainers.image.created=${{ steps.meta.outputs.ts }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.tag }}
-            COMMIT=${{ steps.meta.outputs.commit }}
-            BUILD_DATE=${{ steps.meta.outputs.ts }}
-            GO_VERSION=${{ steps.meta.outputs.go_version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Re-tag the GHCR manifest for Docker Hub. We use `docker buildx
-      # imagetools create` (built into the runner, no extra install) to
-      # re-push the same multi-arch manifest under the docker.io path
-      # so the two registries stay in lock-step without rebuilding.
-      - name: Mirror to Docker Hub
-        if: env.DOCKERHUB_PUSH == 'true'
-        run: |
-          set -euo pipefail
-          for suffix in "${{ steps.meta.outputs.tag }}" "${{ steps.meta.outputs.major_minor }}" latest; do
-            echo "Mirroring ${{ env.GHCR_REPO }}:${suffix} -> ${{ env.DOCKERHUB_REPO }}:${suffix}..."
-            docker buildx imagetools create \
-              --tag "${{ env.DOCKERHUB_REPO }}:${suffix}" \
-              "${{ env.GHCR_REPO }}:${suffix}"
-          done
-
-      - name: Verify GHCR package is publicly pullable
-        env:
-          VERSION: ${{ steps.meta.outputs.tag }}
-        run: |
-          # GHCR packages published via GITHUB_TOKEN from a public repo
-          # inherit public visibility, but GHCR's REST API still requires
-          # auth. The behaviour we care about — "anyone can `docker pull`
-          # this image" — is best verified by an actual anonymous pull.
-          docker logout ghcr.io 2>/dev/null || true
-          docker pull --platform linux/amd64 \
-            "ghcr.io/davidcollom/rpi_exporter:${VERSION}"
-          echo "GHCR davidcollom/rpi_exporter:${VERSION} anonymous pull -> OK"
-
-      - name: Install cosign
+      - name: Set up cosign for keyless signing
+        # cosign ships its own binary via this installer; goreleaser then
+        # shells out to it from the docker_signs block.
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign GHCR image with keyless cosign
-        env:
-          VERSION: ${{ steps.meta.outputs.tag }}
-        run: |
-          cosign sign --yes \
-            --registry-username="${{ github.actor }}" \
-            --registry-password="${{ secrets.GITHUB_TOKEN }}" \
-            "${{ env.GHCR_REPO }}@${{ steps.build.outputs.digest }}"
+      - name: Login to Docker Hub (if configured)
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Sign Docker Hub image with keyless cosign
-        if: env.DOCKERHUB_PUSH == 'true'
+      - name: Run GoReleaser
         env:
-          VERSION: ${{ steps.meta.outputs.tag }}
+          GO_VERSION: ${{ steps.version.outputs.go_version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          dockerhub_digest=$(docker buildx imagetools inspect \
-            "${{ env.DOCKERHUB_REPO }}:$VERSION" --raw \
-            | jq -r '.manifests[0].digest // empty')
-          if [ -z "$dockerhub_digest" ]; then
-            echo "::error::failed to compute Docker Hub digest for $VERSION"
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "${{ inputs.publish }}" != "true" ]; then
+            goreleaser release --clean --snapshot
+          else
+            # In goreleaser v2 the version is read from the git tag
+            # automatically; there is no --release-version flag.
+            goreleaser release --clean
           fi
-          cosign sign --yes \
-            --registry-username="${{ github.actor }}" \
-            --registry-password="${{ secrets.GITHUB_TOKEN }}" \
-            "${{ env.DOCKERHUB_REPO }}@$dockerhub_digest"

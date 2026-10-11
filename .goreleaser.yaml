@@ -2,26 +2,24 @@
 #
 # GoReleaser config for davidcollom/rpi_exporter.
 #
-# Release pipeline (triggered from .github/workflows/release.yaml on
-# `workflow_dispatch` from a maintainer):
+# This single config produces everything for a release:
 #
-#   * Multi-arch static binary builds (linux/darwin × amd64/arm64/arm/v7)
-#   * tar.gz archives per OS/arch
-#   * Source tarball
-#   * SPDX SBOM
-#   * SHA256SUMS
-#   * GitHub Release with auto-generated changelog
+#   * Multi-arch static binary builds (linux/darwin × amd64/arm64,
+#     plus linux/arm v7).
+#   * tar.gz archives per OS/arch.
+#   * Source tarball.
+#   * SPDX SBOM (spdx-json) attached to each archive.
+#   * SHA256SUMS.
+#   * Multi-arch OCI image (linux/amd64, linux/arm64, linux/arm/v7)
+#     built with the existing Dockerfile, pushed to
+#     ghcr.io/davidcollom/rpi_exporter (and docker.io when the
+#     DOCKERHUB_* secrets are configured).
+#   * Keyless cosign signature on the OCI image (SLSA provenance).
+#   * GitHub Release with auto-generated changelog grouped by
+#     Conventional Commits type.
 #
-# Multi-arch Docker image build/push is handled separately in the
-# release workflow (via docker/build-push-action). Keeping the Docker
-# pipeline out of goreleaser lets us:
-#
-#   * Reuse the same docker-push step that the CI workflow validates
-#     on every PR, reducing the chance of CI/release drift.
-#   * Iterate on Docker packaging independently of goreleaser.
-#
-# Validated with `goreleaser check`. Snapshots with `goreleaser release
-# --clean --snapshot`.
+# Validated with `goreleaser check`. Snapshots with
+# `goreleaser release --clean --snapshot`.
 
 version: 2
 
@@ -48,23 +46,21 @@ builds:
     goarch:
       - amd64
       - arm64
+      - arm
     goarm:
       - "7"
     ignore:
       - goos: darwin
         goarch: arm
-        goarm: "7"
 
-    # Inject build-time metadata so rpi_exporter_build_info{version,revision,...}
+    # Inject build-time metadata so rpi_exporter_build_info{version,...}
     # is populated at build time without needing Makefile ldflags.
     ldflags:
       - -s -w
-      # version settings live in the `release:` section below as env vars
-      # that goreleaser sets; we forward them via -X.
       - -X github.com/prometheus/common/version.Version={{.Version}}
       - -X github.com/prometheus/common/version.Revision={{.ShortCommit}}
       - -X github.com/prometheus/common/version.Branch={{.Branch}}
-      - -X github.com/prometheus/common/version.BuildUser=docker
+      - -X github.com/prometheus/common/version.BuildUser=goreleaser
       - -X github.com/prometheus/common/version.BuildDate={{.CommitDate}}
       - -X github.com/prometheus/common/version.GoVersion={{.Env.GO_VERSION}}
 
@@ -96,15 +92,83 @@ source:
   enabled: true
   prefix_template: "{{ .ProjectName }}-{{ .Version }}-src"
 
-# SPDX SBOM. The right combination of `id`, `documents`, and
-# `artifacts` for goreleaser v2 to publish a single SBOM file per
-# archive without colliding on the artifact name is brittle; the
-# current run fails with "404 Not Found" on the SBOM upload step
-# (the artifact is generated but the upload path goreleaser computes
-# does not match). Disable for now; we can re-enable when the right
-# combo is verified. SBOMs can still be produced via a separate
-# workflow step.
-sboms: []
+# SPDX SBOM attached to each archive.
+# `artifacts: archive` puts the SBOM next to the binary inside the
+# tarball; `documents: [spdx-json]` produces a JSON-format SPDX (the
+# `spdx` value the older config used is not a valid format and was
+# rejected silently, leading to upload 404s).
+sboms:
+  - id: spdx
+    documents:
+      - spdx-json
+    artifacts: archive
+
+# Multi-arch OCI image. Built with the existing multi-stage
+# Dockerfile and pushed via `docker buildx build` (no separate
+# `docker build-push-action` step is needed in the workflow).
+#
+# `extra_files` makes the goreleaser build context explicit: goreleaser's
+# default context is the project root, but the `COPY go.mod go.sum ./`
+# line in the Dockerfile can occasionally be missed by the build
+# daemon's internal context walk. Including the two files by name
+# removes the ambiguity.
+dockers_v2:
+  - id: rpi_exporter
+    dockerfile: Dockerfile.goreleaser
+    images:
+      - docker.io/davidcollom/rpi_exporter
+      - ghcr.io/davidcollom/rpi_exporter
+    tags:
+      - "{{ .Tag }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      - "{{ .Major }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+      - linux/arm/v7
+    extra_files:
+      - LICENSE
+      - README.md
+      # The prebuilt static binaries are placed in the docker build
+      # context by goreleaser's `dockers_v2` step itself (at
+      # `linux/amd64/rpi_exporter`, `linux/arm64/rpi_exporter`, and
+      # `linux/arm/v7/rpi_exporter`), so we don't need to add them
+      # via extra_files.
+    build_args:
+      VERSION: "{{ .Tag }}"
+      COMMIT: "{{ .ShortCommit }}"
+      BUILD_DATE: "{{ .CommitDate }}"
+      GO_VERSION: "{{ .Env.GO_VERSION }}"
+    labels:
+      org.opencontainers.image.title: rpi_exporter
+      org.opencontainers.image.description: Raspberry Pi hardware metrics exporter for Prometheus
+      org.opencontainers.image.source: https://github.com/davidcollom/rpi_exporter
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.vendor: David Collom
+      org.opencontainers.image.revision: "{{ .ShortCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+      org.opencontainers.image.version: "{{ .Tag }}"
+    sbom: spdx
+
+# Keyless cosign signing of the OCI image using the OIDC token
+# provided by the GitHub Actions runner (`id-token: write`).
+# Verifying:
+#   cosign verify \
+#     --certificate-identity-regexp 'https://github.com/davidcollom/rpi_exporter' \
+#     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+#     ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
+docker_signs:
+  - id: cosign-keyless
+    cmd: cosign
+    artifacts: all
+    output: true
+    signature: "${artifact}-cosign.sig"
+    args:
+      - sign
+      - "${artifact}"
+      - --yes
+      - --upload=true
 
 # Auto-generated changelog, grouped by Conventional Commits type, scoped
 # to commits not already in a previous tag.
@@ -179,11 +243,6 @@ release:
       ghcr.io/davidcollom/rpi_exporter:{{ .Tag }}
     ```
   include_meta: true
-  # The SPDX SBOM is attached to each archive as a sibling file by
-  # the `sboms:` block above (`artifacts: archive`). The release body
-  # also gets the rendered CHANGELOG automatically. We don't need any
-  # extra_files — the previous `./sbom/**/*` glob pointed at the wrong
-  # path and was returning 404 on upload.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"

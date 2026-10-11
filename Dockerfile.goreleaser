@@ -1,0 +1,31 @@
+# Goreleaser-only Dockerfile. The CI workflow uses the main `Dockerfile`
+# (which builds from source in a multi-stage build). This one assumes
+# the goreleaser build context already contains the prebuilt static
+# binary under `linux/amd64/rpi_exporter`, `linux/arm64/rpi_exporter`,
+# or `linux/arm/v7/rpi_exporter` (placed there automatically by the
+# `dockers_v2` step from the `builds:` block above).
+#
+# When goreleaser builds a multi-platform manifest it spawns one
+# `docker buildx build` per platform. Each per-platform build only
+# sees the binary for the platform it's building — so we must use
+# the buildx-provided `$TARGETPLATFORM` variable to pick the right
+# path, not a static one. The buildx `$TARGETPLATFORM` is one of
+# `linux/amd64`, `linux/arm64`, or `linux/arm/v7`.
+
+ARG GO_VERSION=1.27
+
+FROM golang:${GO_VERSION}-alpine AS src
+ARG TARGETPLATFORM
+# Copy the prebuilt static binary for THIS platform. Only one of the
+# three paths below resolves to a real file in the build context —
+# the others are intentionally absent because goreleaser only puts
+# the matching platform's binary in the build context.
+COPY $TARGETPLATFORM/rpi_exporter /out/rpi_exporter
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=src /out/rpi_exporter /bin/rpi_exporter
+COPY LICENSE  /LICENSE
+COPY README.md /README.md
+USER 65532:65532
+EXPOSE 9243
+ENTRYPOINT ["/bin/rpi_exporter"]
