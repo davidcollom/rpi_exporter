@@ -16,7 +16,6 @@ package collector
 import (
 	"log/slog"
 	"fmt"
-	"github.com/davidcollom/rpi_exporter/collector/firmware"
 	"strconv"
 	"strings"
 
