@@ -17,7 +17,6 @@ package collector
 import (
 	"bytes"
 	"log/slog"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -34,6 +33,7 @@ func getGpuComponents() []string {
 
 type gpuCollector struct {
 	vcgencmd       string
+	transport string
 	gpuTempCelsius *prometheus.Desc
 	gpuFreqHertz   *prometheus.Desc
 	gpuVoltage     *prometheus.Desc
@@ -48,6 +48,7 @@ func init() {
 func NewGPUCollector() (Collector, error) {
 	gc := &gpuCollector{
 		vcgencmd: *vcgencmdPath,
+		transport: *firmwareTransport,
 		gpuTempCelsius: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, gpuSubsystem, "temperature_celsius"),
 			"GPU temperature in degrees celsius (°C).",
@@ -112,7 +113,7 @@ func (c *gpuCollector) Update(ch chan<- prometheus.Metric) error {
 // measureTemp runs `vcgencmd measure_temp` and returns the temperature
 // in degrees celsius.
 func (c *gpuCollector) measureTemp() (float64, error) {
-	out, err := exec.Command(c.vcgencmd, "measure_temp").Output()
+	out, err := firmwareCommand(c.transport, c.vcgencmd, "measure_temp")
 	if err != nil {
 		return 0, err
 	}
@@ -122,7 +123,7 @@ func (c *gpuCollector) measureTemp() (float64, error) {
 // measureVolts runs `vcgencmd measure_volts` and returns the voltage
 // in volts.
 func (c *gpuCollector) measureVolts() (float64, error) {
-	out, err := exec.Command(c.vcgencmd, "measure_volts").Output()
+	out, err := firmwareCommand(c.transport, c.vcgencmd, "measure_volts")
 	if err != nil {
 		return 0, err
 	}
@@ -132,7 +133,7 @@ func (c *gpuCollector) measureVolts() (float64, error) {
 // measureClock runs `vcgencmd measure_clock <component>` and returns
 // the clock frequency in hertz.
 func (c *gpuCollector) measureClock(component string) (float64, error) {
-	out, err := exec.Command(c.vcgencmd, "measure_clock", component).Output()
+	out, err := firmwareCommand(c.transport, c.vcgencmd, "measure_clock "+component)
 	if err != nil {
 		return 0, err
 	}

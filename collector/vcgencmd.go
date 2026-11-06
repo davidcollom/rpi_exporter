@@ -15,7 +15,7 @@ package collector
 
 import (
 	"log/slog"
-	"os/exec"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -55,6 +55,7 @@ var throttledBits = []struct {
 
 type vcgencmdCollector struct {
 	vcgencmd             string
+	transport string
 	voltageVolts         *prometheus.Desc
 	throttledRaw         *prometheus.Desc
 	throttledFlags       *prometheus.Desc
@@ -70,6 +71,7 @@ func init() {
 func NewVcgencmdCollector() (Collector, error) {
 	cc := &vcgencmdCollector{
 		vcgencmd: *vcgencmdPath,
+		transport: *firmwareTransport,
 		voltageVolts: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, vcgencmdSubsystem, "voltage_volts"),
 			"SoC core voltage in volts (measure_volts).",
@@ -107,7 +109,7 @@ func (c *vcgencmdCollector) Update(ch chan<- prometheus.Metric) error {
 	raw, ok, err := c.getThrottled()
 	if err != nil {
 		slog.Debug("get_throttled failed", "err", err)
-		return nil
+		return err
 	}
 	if !ok {
 		return nil
@@ -137,7 +139,7 @@ func (c *vcgencmdCollector) Update(ch chan<- prometheus.Metric) error {
 
 // measureVolts calls `vcgencmd measure_volts` and returns the voltage in volts.
 func (c *vcgencmdCollector) measureVolts() (float64, error) {
-	out, err := exec.Command(c.vcgencmd, "measure_volts").Output()
+	out, err := firmwareCommand(c.transport, c.vcgencmd, "measure_volts")
 	if err != nil {
 		return 0, err
 	}
@@ -156,18 +158,18 @@ func (c *vcgencmdCollector) measureVolts() (float64, error) {
 // getThrottled calls `vcgencmd get_throttled` and returns the raw hex value.
 // It returns ok=false when the firmware doesn't support the call.
 func (c *vcgencmdCollector) getThrottled() (raw uint32, ok bool, err error) {
-	out, err := exec.Command(c.vcgencmd, "get_throttled").Output()
+	out, err := firmwareCommand(c.transport, c.vcgencmd, "get_throttled")
 	if err != nil {
 		return 0, false, err
 	}
 	s := strings.TrimSpace(string(out))
 	const prefix = "throttled="
 	if !strings.HasPrefix(s, prefix) {
-		return 0, false, nil
+		return 0, false, fmt.Errorf("unexpected get_throttled result: %q", s)
 	}
 	v, err := strconv.ParseUint(s[len(prefix):], 0, 32) // 0 => base auto-detected: 0x.. or 0b..
 	if err != nil {
-		return 0, false, nil
+		return 0, false, err
 	}
 	return uint32(v), true, nil
 }
